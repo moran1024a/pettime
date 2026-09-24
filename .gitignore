@@ -1,0 +1,11 @@
+# Compiled binaries
+*.exe
+*.dll
+*.pdb
+bin/
+obj/
+.vs/
+
+# Local runtime and generated previews
+runtime.log
+preview/
