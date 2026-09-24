@@ -1,4 +1,4 @@
-# 小强桌宠 · 动态版
+# 江螂桌宠 · 动态版
 
 从 GitHub 下载源码后，在 Windows 上双击 `Start-Roach.cmd` 会自动调用系统 .NET Framework 编译器生成 EXE 并启动；也可以运行 `Build.cmd` 手动构建。仓库不提交编译后的 EXE。图片已内嵌到生成的 EXE，不依赖运行目录中的 `assets` 文件夹。没有常驻控制台；同一登录会话只运行一个新版实例。
 
