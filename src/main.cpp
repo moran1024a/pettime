@@ -17,7 +17,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Pettime");
     app.setApplicationName("Pettime");
-    app.setApplicationVersion("0.2.0");
+    app.setApplicationVersion(pettime::NetworkService::applicationVersion());
     app.setQuitOnLastWindowClosed(false);
     QCommandLineParser parser;
     parser.setApplicationDescription("Pettime · Qt 桌宠");

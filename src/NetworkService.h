@@ -19,13 +19,16 @@ class NetworkTest;
 class NetworkService : public QObject {
     Q_OBJECT
   public:
+    static QString applicationVersion() { return QStringLiteral(PETTIME_VERSION); }
     struct Info {
         int count = 1;
         int limit = 72;
         int dispatched = 0, visitors = 0;
     };
     struct Device {
-        QString id, name, address, state;
+        QString id, name, address, state, appVersion;
+        int protocolVersion = 0;
+        bool compatible = false;
         quint16 port = 0;
         int count = 0, limit = 0;
         QDateTime lastContact;
@@ -35,6 +38,7 @@ class NetworkService : public QObject {
     // Nondefault options are for isolated integration tests, not application settings.
     struct Options {
         quint16 port = 21012;
+        QString appVersion = applicationVersion();
         bool loopbackOnly = false;
         QList<QPair<QHostAddress, quint16>> discoveryTargets;
         std::function<qint64()> now;
@@ -47,6 +51,7 @@ class NetworkService : public QObject {
     void stop();
     void refresh();
     void enableDispatch() { dispatchEnabled_ = true; }
+    QString localVersion() const { return options_.appVersion; }
     QString deviceId() const { return id_; }
     QString sessionId() const { return session_; }
     QString peerSession(const QString &peer) const;
@@ -115,6 +120,8 @@ class NetworkService : public QObject {
     void flushDispatch(Connection &c);
     QJsonObject localData();
     bool applyInfo(Peer &peer, const QJsonObject &object);
+    bool checkVersion(Peer &peer, const QJsonObject &object);
+    QJsonObject discoveryData() const;
     void markReady(Connection &c);
     void tick();
     SettingsStore store_;

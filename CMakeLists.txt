@@ -15,6 +15,7 @@ add_library(pettime_lib STATIC
     src/NetworkService.cpp src/NetworkPanel.cpp src/DispatchController.cpp
 )
 target_include_directories(pettime_lib PUBLIC src)
+target_compile_definitions(pettime_lib PUBLIC PETTIME_VERSION="${PROJECT_VERSION}")
 target_link_libraries(pettime_lib PUBLIC Qt6::Widgets Qt6::Network)
 if(MSVC)
     target_compile_options(pettime_lib PUBLIC /utf-8)

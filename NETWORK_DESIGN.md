@@ -36,7 +36,7 @@ IP 为当前或最近成功 TCP 连接的实际对端地址；同一实例多网
 
 ## 5. 发现协议：UDP
 
-UTF-8 JSON，每包最多 1024 字节；未知协议或版本直接忽略。固定 protocol="pettime"、version=1。
+UTF-8 JSON，每包最多 1024 字节；未知协议忽略。本端发送 protocol="pettime"、version=1，并增加 appVersion、deviceName、petCount、petLimit。扫描接收保留基本字段格式的其他协议版本（1～65535），但标记不兼容、禁止连接。
 
 请求字段：type="discover"、deviceId、sessionId、requestId（本轮随机 UUID）、tcpPort=21012。
 响应字段：type="announce"、deviceId、sessionId、requestId、tcpPort=21012。
@@ -53,9 +53,11 @@ UTF-8 JSON，每包最多 1024 字节；未知协议或版本直接忽略。固�
 
 ### 握手
 
-1. 主动方连接成功后发送 hello，含 protocol、version、deviceId、sessionId、deviceName、tcpPort、petCount、petLimit，以及随机 connectionId。
+1. 主动方连接成功后发送 hello，含 protocol、version、appVersion、deviceId、sessionId、deviceName、tcpPort、petCount、petLimit，以及随机 connectionId。
 2. 被动方检查来源子网、版本、字段、身份冲突及连接方向，回复 helloAck，含相同 connectionId 和本机完整资料。
 3. 主动方校验 helloAck 与发现身份一致后发送 ready，回显 connectionId；主动方进入已连接，被动方收到有效 ready 后进入已连接。
+
+应用版本以 CMake PROJECT_VERSION 为唯一来源，严格比较完整字符串。扫描可展示不同版本、缺少版本号的旧客户端及协议版本不匹配设备，不对它们主动连接或重试；广播更新可以维持其列表可见性，但不代表互联成功。hello 与 helloAck 双向再次核对 appVersion，缺失、不匹配或协议不兼容均拒绝进入就绪状态；资料更新也验证版本。已经完成握手的健康连接不允许 UDP 广告覆盖其协商版本。目标升级为匹配版本并重新开启服务后，可通过后续扫描重新互联。
 
 TCP 建连超时 3 秒；建立后握手最长 3 秒。握手前只允许对应握手消息，不接受资料更新和心跳。握手是协议及身份声明校验，不是认证。
 
@@ -69,11 +71,11 @@ TCP 建连超时 3 秒；建立后握手最长 3 秒。握手前只允许对应�
 - infoChanged：主动推送完整基本资料，带本会话递增 revision。hello/helloAck 和 info 也带 revision；只应用较新的资料版本，相同版本允许作为查询响应确认。
 - ping/pong：回显本次随机 requestId；每条连接最多一个待确认心跳。
 
-完整资料始终包含 deviceId、sessionId、deviceName、tcpPort、petCount、petLimit、revision；握手后身份不可变。revision 仅作用于该 sessionId，从 1 开始，使用 JSON 可精确表示的非负整数范围。检查所有字段类型、UUID、版本及关联 ID；数量满足 1 <= petCount <= petLimit <= 72，名称上限 128 字符。设备名以纯文本显示。未知额外字段可忽略，未知消息类型、非法字段或错误状态消息关闭连接并记录简短原因。
+完整资料始终包含 deviceId、sessionId、deviceName、tcpPort、petCount、petLimit、revision、appVersion；握手后身份不可变。revision 仅作用于该 sessionId，从 1 开始，使用 JSON 可精确表示的非负整数范围。检查所有字段类型、UUID、版本及关联 ID；数量满足 1 <= petCount <= petLimit <= 72，名称上限 128 字符。设备名以纯文本显示。未知额外字段可忽略，未知消息类型、非法字段或错误状态消息关闭连接并记录简短原因。
 
 ### 资源边界
 
-默认最多 64 个已连接对端，接收新入站连接时要求未完成连接少于 16 个，最多 4 个并发出站尝试、128 个候选/设备记录。达到容量后拒绝新接入，不挤掉健康连接；主动端稍后重试。每连接收发缓冲各限制 64 KiB，限制收包频率（旧客户端每秒最多 32 帧；协商派遣的连接使用派遣文档中的独立预算），超限断开；未写出的资料更新合并为最新快照，慢端不能导致缓冲无限增长。socket 和 QTimer 全部使用 Qt 异步事件，不调用阻塞等待，不新增线程。
+默认最多 64 个已连接对端，接收新入站连接时要求未完成连接少于 16 个，最多 4 个并发出站尝试、128 个候选/设备记录。达到容量后拒绝新接入，不挤掉健康连接；主动端稍后重试。每连接收发缓冲各限制 64 KiB，限制收包频率（未协商派遣能力的连接每秒最多 32 帧；协商派遣的连接使用派遣文档中的独立预算），超限断开；未写出的资料更新合并为最新快照，慢端不能导致缓冲无限增长。socket 和 QTimer 全部使用 Qt 异步事件，不调用阻塞等待，不新增线程。
 
 ## 7. 刷新、保活、更新和资源管理
 

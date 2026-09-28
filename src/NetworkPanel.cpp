@@ -18,10 +18,10 @@ NetworkPanel::NetworkPanel(NetworkService &service, QWidget *parent)
     local_ = new QLabel(this);
     local_->setTextFormat(Qt::PlainText);
     local_->setWordWrap(true);
-    table_ = new QTableWidget(0, 10, this);
+    table_ = new QTableWidget(0, 11, this);
     table_->setObjectName("networkDevices");
     table_->setHorizontalHeaderLabels({"设备名", "IP", "端口", "数量", "上限", "连接状态",
-                                       "最后通讯", "派出", "访客 / 144", "派遣能力"});
+                                       "最后通讯", "派出", "访客 / 144", "派遣能力", "版本"});
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -70,7 +70,8 @@ void NetworkPanel::updateView() {
             .arg(service_.addresses().isEmpty() ? "未开启" : service_.addresses().join(", "))
             .arg(service_.port())
             .arg(info.dispatched)
-            .arg(info.visitors));
+            .arg(info.visitors) +
+        "\n本机版本：" + service_.localVersion());
     QString selected;
     if (table_->currentRow() >= 0 && table_->item(table_->currentRow(), 0))
         selected = table_->item(table_->currentRow(), 0)->data(Qt::UserRole).toString();
@@ -90,7 +91,8 @@ void NetworkPanel::updateView() {
                                  d.lastContact.isValid() ? d.lastContact.toString("HH:mm:ss") : "—",
                                  QString::number(d.dispatched),
                                  QString::number(d.visitors),
-                                 d.dispatch ? "支持" : "不支持或未握手"};
+                                 d.dispatch ? "支持" : "不支持或未握手",
+                                 d.appVersion.isEmpty() ? "未知" : d.appVersion};
         for (int col = 0; col < values.size(); ++col) {
             auto *item = table_->item(row, col);
             if (!item) {

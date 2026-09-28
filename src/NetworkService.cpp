@@ -195,10 +195,12 @@ void NetworkService::discover(bool manual) {
             drop(socket, "网络接口已变化");
     const QString request = uuid();
     requests_.insert(request, now());
-    const QJsonObject message{{"protocol", "pettime"},    {"version", 1},
-                              {"type", "discover"},       {"deviceId", id_},
-                              {"sessionId", session_},    {"requestId", request},
-                              {"tcpPort", options_.port}, {"manual", manual}};
+    QJsonObject message{{"protocol", "pettime"},    {"version", 1},          {"type", "discover"},
+                        {"deviceId", id_},          {"sessionId", session_}, {"requestId", request},
+                        {"tcpPort", options_.port}, {"manual", manual}};
+    const auto details = discoveryData();
+    for (auto it = details.begin(); it != details.end(); ++it)
+        message[it.key()] = it.value();
     const auto bytes = QJsonDocument(message).toJson(QJsonDocument::Compact);
     bool failed = false;
     for (const auto &target : targets_)
@@ -238,8 +240,9 @@ void NetworkService::receiveDatagrams() {
             continue;
         const auto doc = QJsonDocument::fromJson(d.data());
         const auto o = doc.object();
-        if (!envelope(o) || !validId(o["deviceId"]) || !validId(o["sessionId"]) ||
-            !validId(o["requestId"]) || !integer(o["tcpPort"], 1, 65535) ||
+        if (o["protocol"] != "pettime" || !integer(o["version"], 1, 65535) ||
+            !validId(o["deviceId"]) || !validId(o["sessionId"]) || !validId(o["requestId"]) ||
+            !integer(o["tcpPort"], 1, 65535) ||
             (!options_.loopbackOnly && o["tcpPort"].toInt() != 21012))
             continue;
         if (o["deviceId"] == id_ && o["sessionId"] == session_)
@@ -258,6 +261,9 @@ void NetworkService::receiveDatagrams() {
                                  {"type", "announce"},      {"deviceId", id_},
                                  {"sessionId", session_},   {"requestId", o["requestId"]},
                                  {"tcpPort", options_.port}};
+            const auto details = discoveryData();
+            for (auto it = details.begin(); it != details.end(); ++it)
+                response[it.key()] = it.value();
             udp_.writeDatagram(QJsonDocument(response).toJson(QJsonDocument::Compact),
                                d.senderAddress(), d.senderPort());
             candidate(o, d.senderAddress(), o["manual"].toBool());
@@ -299,6 +305,26 @@ void NetworkService::candidate(const QJsonObject &o, const QHostAddress &address
         p.endpoints.clear();
         p.retryAt = now();
     }
+    const auto existing = connections_.value(p.socket);
+    if (!existing || !existing->ready) {
+        const bool wasCompatible = p.device.compatible;
+        checkVersion(p, o);
+        if (o["deviceName"].isString())
+            p.device.name = o["deviceName"].toString().left(128);
+        if (integer(o["petLimit"], 1, 72) && integer(o["petCount"], 1, o["petLimit"].toInt())) {
+            p.device.count = o["petCount"].toInt();
+            p.device.limit = o["petLimit"].toInt();
+        }
+        if (!p.device.compatible) {
+            if (p.socket)
+                drop(p.socket, "版本不匹配");
+            p.lastSeen = now(); // Discovery keeps an incompatible device visible, not connected.
+            p.device.lastContact = QDateTime::currentDateTime();
+        } else if (!wasCompatible) {
+            p.device.state = "等待连接";
+            p.retryAt = now();
+        }
+    }
     const quint16 port = quint16(o["tcpPort"].toInt());
     bool found = false;
     for (const auto &e : p.endpoints)
@@ -321,7 +347,7 @@ void NetworkService::tryConnect(const QString &id) {
     if (!running_ || id_ >= id || !peers_.contains(id))
         return;
     auto &p = peers_[id];
-    if (p.socket || p.endpoints.isEmpty() || now() < p.retryAt)
+    if (!p.device.compatible || p.socket || p.endpoints.isEmpty() || now() < p.retryAt)
         return;
     int pending = 0, ready = 0;
     for (const auto &c : connections_) {
@@ -379,6 +405,29 @@ void NetworkService::attach(QTcpSocket *socket, bool outbound, const QString &id
     if (socket->bytesAvailable())
         read(socket);
 }
+QJsonObject NetworkService::discoveryData() const {
+    const auto info = snapshot_();
+    return {{"appVersion", options_.appVersion},
+            {"deviceName", QSysInfo::machineHostName().left(128)},
+            {"petCount", info.count},
+            {"petLimit", info.limit}};
+}
+bool NetworkService::checkVersion(Peer &p, const QJsonObject &o) {
+    p.device.appVersion = o["appVersion"].isString() && o["appVersion"].toString().size() <= 64
+                              ? o["appVersion"].toString()
+                              : QString{};
+    p.device.protocolVersion = o["version"].toInt();
+    p.device.compatible = !p.device.appVersion.isEmpty() &&
+                          p.device.appVersion == options_.appVersion &&
+                          p.device.protocolVersion == 1;
+    if (!p.device.compatible) {
+        p.device.dispatch = false;
+        p.device.state = p.device.appVersion.isEmpty()   ? "版本未知，无法互联"
+                         : p.device.protocolVersion != 1 ? "协议版本不匹配，无法互联"
+                                                         : "版本不匹配，无法互联";
+    }
+    return p.device.compatible;
+}
 QJsonObject NetworkService::localData() {
     const auto info = snapshot_();
     if (info.count != previous_.count || info.limit != previous_.limit ||
@@ -393,6 +442,7 @@ QJsonObject NetworkService::localData() {
             {"petCount", info.count},
             {"petLimit", info.limit},
             {"revision", revision_},
+            {"appVersion", options_.appVersion},
             {"capabilities", dispatchEnabled_ ? QJsonArray{"dispatch-v1"} : QJsonArray{}},
             {"dispatched", info.dispatched},
             {"visitors", info.visitors}};
@@ -531,6 +581,8 @@ bool NetworkService::applyInfo(Peer &p, const QJsonObject &o) {
     if (!validInfo(o) || o["deviceId"] != p.device.id || o["sessionId"] != p.session ||
         (!options_.loopbackOnly && o["tcpPort"].toInt() != 21012))
         return false;
+    if (!checkVersion(p, o))
+        return false;
     if (o["revision"].toDouble() > p.revision) {
         p.revision = o["revision"].toDouble();
         p.device.name = o["deviceName"].toString();
@@ -583,8 +635,13 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
                 p.lastSeen = now();
             p.device.id = id;
             p.session = session;
-            if (!applyInfo(p, o))
+            p.device.address = c.socket->peerAddress().toString();
+            p.device.port = quint16(o["tcpPort"].toInt());
+            p.device.name = o["deviceName"].toString();
+            if (!applyInfo(p, o)) {
+                emit changed();
                 return false;
+            }
             c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v1");
             c.peer = id;
             c.session = session;
@@ -656,7 +713,8 @@ void NetworkService::drop(QTcpSocket *socket, const QString &reason) {
         auto &p = peers_[c->peer];
         if (p.socket == socket) {
             p.socket = nullptr;
-            p.device.state = id_ < c->peer ? "重连等待：" + reason : "离线：" + reason;
+            if (p.device.compatible)
+                p.device.state = id_ < c->peer ? "重连等待：" + reason : "离线：" + reason;
             const int delay = std::min(30000, 1000 * (1 << std::min(p.failures++, 5)));
             p.retryAt = now() + delay + QRandomGenerator::global()->bounded(251);
         }

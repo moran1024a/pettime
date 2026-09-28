@@ -35,10 +35,15 @@ QByteArray frame(QJsonObject o) {
     return bytes + body;
 }
 QJsonObject hello(const QString &id = firstId) {
-    return {{"type", "hello"},       {"deviceId", id},
-            {"sessionId", uuid()},   {"deviceName", "测试设备 <b>文本</b>"},
-            {"tcpPort", 21012},      {"petCount", 2},
-            {"petLimit", 12},        {"revision", 1},
+    return {{"type", "hello"},
+            {"appVersion", NetworkService::applicationVersion()},
+            {"deviceId", id},
+            {"sessionId", uuid()},
+            {"deviceName", "测试设备 <b>文本</b>"},
+            {"tcpPort", 21012},
+            {"petCount", 2},
+            {"petLimit", 12},
+            {"revision", 1},
             {"connectionId", uuid()}};
 }
 struct Pair {
@@ -134,6 +139,113 @@ class NetworkTest : public QObject {
         QVERIFY(!p.a->timer_.isActive());
         udp.close();
         QVERIFY(p.a->start());
+    }
+    void differentVersionsRemainDiscoverableAndNeverConnect() {
+        Pair p;
+        p.b->options_.appVersion = "99.0.0";
+        QVERIFY(p.start());
+        QTRY_COMPARE(p.a->devices().size(), 1);
+        QTRY_COMPARE(p.b->devices().size(), 1);
+        QCOMPARE(p.a->devices()[0].appVersion, QString("99.0.0"));
+        QCOMPARE(p.a->devices()[0].state, QString("版本不匹配，无法互联"));
+        QCOMPARE(p.a->devices()[0].count, p.ib.count);
+        QVERIFY(!p.a->devices()[0].name.isEmpty());
+        QVERIFY(!p.a->dispatchReady(secondId));
+        for (int i = 0; i < 15; ++i) {
+            p.time += 10000;
+            p.a->refresh();
+            p.b->refresh();
+            QTest::qWait(5);
+            QVERIFY(p.a->connections_.isEmpty());
+            QVERIFY(p.b->connections_.isEmpty());
+        }
+        QCOMPARE(p.a->devices().size(), 1);
+        NetworkPanel panel(*p.a);
+        const auto *table = panel.findChild<QTableWidget *>("networkDevices");
+        QCOMPARE(table->item(0, 10)->text(), QString("99.0.0"));
+        QCOMPARE(table->item(0, 5)->text(), QString("版本不匹配，无法互联"));
+        p.b->stop();
+        p.b->options_.appVersion = NetworkService::applicationVersion();
+        QVERIFY(p.b->start());
+        p.time += 1000;
+        p.a->refresh();
+        p.b->refresh();
+        QTRY_VERIFY(p.connected());
+    }
+    void unknownAndFutureVersionsAreVisible() {
+        Pair p;
+        QVERIFY(p.b->start());
+        QUdpSocket sender;
+        QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
+        QJsonObject o{{"protocol", "pettime"}, {"version", 1},        {"type", "discover"},
+                      {"deviceId", firstId},   {"sessionId", uuid()}, {"requestId", uuid()},
+                      {"tcpPort", p.a->port()}};
+        auto publish = [&] {
+            sender.writeDatagram(QJsonDocument(o).toJson(QJsonDocument::Compact),
+                                 QHostAddress::LocalHost, p.b->port());
+        };
+        publish();
+        QTRY_COMPARE(p.b->devices().size(), 1);
+        QCOMPARE(p.b->devices()[0].state, QString("版本未知，无法互联"));
+        QVERIFY(p.b->connections_.isEmpty());
+        p.time += 1000;
+        o["version"] = 2;
+        o["appVersion"] = NetworkService::applicationVersion();
+        publish();
+        QTRY_COMPARE(p.b->devices()[0].state, QString("协议版本不匹配，无法互联"));
+        QVERIFY(p.b->connections_.isEmpty());
+    }
+    void inboundHandshakeCannotBypassVersionGate_data() {
+        QTest::addColumn<QString>("version");
+        QTest::newRow("different") << QString("99.0.0");
+        QTest::newRow("missing") << QString{};
+    }
+    void inboundHandshakeCannotBypassVersionGate() {
+        QFETCH(QString, version);
+        Pair p;
+        QVERIFY(p.b->start());
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, p.b->port());
+        QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
+        auto h = hello();
+        if (version.isEmpty())
+            h.remove("appVersion");
+        else
+            h["appVersion"] = version;
+        client.write(frame(h));
+        QTRY_COMPARE(client.state(), QAbstractSocket::UnconnectedState);
+        QVERIFY(p.b->connections_.isEmpty());
+        QCOMPARE(p.b->devices().size(), 1);
+        QVERIFY(!p.b->devices()[0].compatible);
+    }
+    void outboundHandshakeRechecksAdvertisedVersion() {
+        Pair p;
+        QTcpServer remote;
+        QVERIFY(remote.listen(QHostAddress::LocalHost, p.b->port()));
+        QVERIFY(p.a->start());
+        const auto session = uuid();
+        p.a->candidate({{"version", 1},
+                        {"appVersion", NetworkService::applicationVersion()},
+                        {"deviceId", secondId},
+                        {"sessionId", session},
+                        {"tcpPort", p.b->port()}},
+                       QHostAddress::LocalHost, false);
+        QTRY_VERIFY(remote.hasPendingConnections());
+        std::unique_ptr<QTcpSocket> socket(remote.nextPendingConnection());
+        QTRY_VERIFY(socket->bytesAvailable() > 4);
+        const auto bytes = socket->readAll();
+        const auto request = QJsonDocument::fromJson(bytes.mid(4)).object();
+        auto reply = hello(secondId);
+        reply["type"] = "helloAck";
+        reply["sessionId"] = session;
+        reply["connectionId"] = request["connectionId"];
+        reply["appVersion"] = "99.0.0";
+        socket->write(frame(reply));
+        QTRY_VERIFY(p.a->connections_.isEmpty());
+        QCOMPARE(p.a->devices()[0].state, QString("版本不匹配，无法互联"));
+        QVERIFY(!p.a->devices()[0].compatible);
+        p.a->tryConnect(secondId);
+        QVERIFY(p.a->connections_.isEmpty());
     }
     void discoveryHandshakeRefreshAndPush() {
         Pair p;
@@ -359,11 +471,19 @@ class NetworkTest : public QObject {
         duplicate.write(frame(h));
         QTRY_COMPARE(duplicate.state(), QAbstractSocket::UnconnectedState);
         QCOMPARE(p.b->peers_[firstId].socket, existing);
-        p.b->candidate({{"deviceId", firstId}, {"sessionId", uuid()}, {"tcpPort", p.a->port()}},
+        p.b->candidate({{"version", 1},
+                        {"appVersion", NetworkService::applicationVersion()},
+                        {"deviceId", firstId},
+                        {"sessionId", uuid()},
+                        {"tcpPort", p.a->port()}},
                        QHostAddress::LocalHost, false);
         QCOMPARE(p.b->peers_[firstId].socket, existing);
         QCOMPARE(p.b->peers_[firstId].device.state, QString("身份冲突"));
-        p.b->candidate({{"deviceId", secondId}, {"sessionId", uuid()}, {"tcpPort", p.a->port()}},
+        p.b->candidate({{"version", 1},
+                        {"appVersion", NetworkService::applicationVersion()},
+                        {"deviceId", secondId},
+                        {"sessionId", uuid()},
+                        {"tcpPort", p.a->port()}},
                        QHostAddress::LocalHost, false);
         QVERIFY(p.b->status().contains("重复设备 ID"));
     }
@@ -384,8 +504,13 @@ class NetworkTest : public QObject {
         QUdpSocket sender;
         sender.setProxy(QNetworkProxy::NoProxy);
         QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
-        QJsonObject o{{"protocol", "pettime"}, {"version", 1},        {"type", "announce"},
-                      {"deviceId", firstId},   {"sessionId", uuid()}, {"requestId", uuid()},
+        QJsonObject o{{"appVersion", NetworkService::applicationVersion()},
+                      {"protocol", "pettime"},
+                      {"version", 1},
+                      {"type", "announce"},
+                      {"deviceId", firstId},
+                      {"sessionId", uuid()},
+                      {"requestId", uuid()},
                       {"tcpPort", p.a->port()}};
         sender.writeDatagram(QJsonDocument(o).toJson(QJsonDocument::Compact),
                              QHostAddress::LocalHost, p.b->port());
@@ -431,7 +556,11 @@ class NetworkTest : public QObject {
         QTcpServer remote;
         QVERIFY(remote.listen(QHostAddress::LocalHost, p.b->port()));
         QVERIFY(p.a->start());
-        p.a->candidate({{"deviceId", secondId}, {"sessionId", uuid()}, {"tcpPort", p.b->port()}},
+        p.a->candidate({{"version", 1},
+                        {"appVersion", NetworkService::applicationVersion()},
+                        {"deviceId", secondId},
+                        {"sessionId", uuid()},
+                        {"tcpPort", p.b->port()}},
                        QHostAddress::LocalHost, false);
         auto *socket = p.a->peers_[secondId].socket;
         QVERIFY(socket);
@@ -455,7 +584,8 @@ class NetworkTest : public QObject {
         QVERIFY(sender.bind(address, 0));
         auto h = hello();
         const QString request = uuid();
-        const QJsonObject discovery{{"protocol", "pettime"},
+        const QJsonObject discovery{{"appVersion", NetworkService::applicationVersion()},
+                                    {"protocol", "pettime"},
                                     {"version", 1},
                                     {"type", "discover"},
                                     {"deviceId", firstId},
