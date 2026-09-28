@@ -1,5 +1,21 @@
 # 重构验证记录
 
+## Windows DLL 部署与 ZIP 分发（2026-09-29）
+
+- 原脚本只生成裸 EXE，没有部署 Qt 与 GCC 运行库，直接运行会出现找不到 DLL 的错误。
+- `build-windows.cmd` 现在编译后调用 `package-windows.ps1`：先用 `windeployqt6` 部署 Qt DLL 和插件，再递归收集所有 EXE/插件/DLL 的 PE 导入依赖；额外复制动态加载的 OpenSSL DLL，写入本地插件路径配置。
+- 输出 `build-windows/Pettime-windows-x64.zip`，附带许可证、说明及 SHA-256 清单。使用全新暂存目录打包，完成或失败后清理暂存目录。
+- 最终 ZIP 解压后检查 46 个 EXE/DLL，未发现未解析的非系统导入；188 个文件的 SHA-256 与清单一致。已确认包含 `platforms/qwindows.dll`、`libssl-3-x64.dll` 与 `libcrypto-3-x64.dll`。
+- 移除 Qt/MSYS2 相关环境变量，PATH 仅保留 Windows 系统目录，从独立临时目录运行解压后的 `pettime.exe --version`，输出 `Pettime 0.2.0`，退出码 0。
+- 未运行项目测试或桌宠交互验收；未安装或配置系统软件。验证解压目录已清理，保留用户要求的最终 ZIP 及现有构建目录。
+
+## Windows 一键编译（2026-09-29）
+
+- 使用 `build-windows.cmd`，工具链位于 `C:\msys64\ucrt64`：GCC 16.2.0、CMake 4.4.3、Ninja 1.13.2、Qt 6.11.2。
+- 在唯一系统临时目录中完成 CMake 配置及全部 20 个构建步骤，成功链接 `pettime.exe`；构建类型为 Release，`BUILD_TESTING=OFF`。
+- 未运行项目测试或启动程序；不代表 Windows 桌面、网络、存档导入或分发包已通过验收。
+- 验证构建目录已删除，未安装软件或修改系统配置。下方各阶段的 Windows 未验证说明保留为历史记录。
+
 ## 实体管理迭代（2026-09-28）
 
 - 已实现 1～72 动态上限、统一实体表、固定主实体身份和主机名、普通实体命名、实体列表、3 秒高亮和独立投喂动画。

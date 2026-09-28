@@ -1,6 +1,6 @@
 # Pettime · Qt 桌宠
 
-基于 [haichaojiang01-stack/pettime](https://github.com/haichaojiang01-stack/pettime) 重构的 C++17 / Qt 6 桌宠。保留原项目的图片素材和行为设计，以 Ubuntu 24.04 **X11** 为运行基线；公共代码和 CMake 构建兼顾 Windows，但 Windows 尚未实际编译或运行验收。
+基于 [haichaojiang01-stack/pettime](https://github.com/haichaojiang01-stack/pettime) 重构的 C++17 / Qt 6 桌宠。保留原项目的图片素材和行为设计，以 Ubuntu 24.04 **X11** 为运行基线；公共代码和 CMake 构建兼顾 Windows；Windows 已通过 MSYS2 UCRT64 Release 编译、ZIP 打包及独立运行库加载验证，桌面交互和网络功能尚未完整验收。
 
 ## 构建与运行
 
@@ -23,15 +23,36 @@ cmake --install build --prefix "$HOME/.local"
 
 安装后仍需要系统 Qt 6 共享库及其 X11 平台插件；单独复制可执行文件不代表已包含这些依赖。
 
-Windows 构建方式（待 Windows 实测）：在匹配 Qt 套件的 MSVC 开发终端执行，设置 `CMAKE_PREFIX_PATH` 指向安装的 Qt MSVC 目录。
+Windows 一键编译并打包：双击根目录的 `build-windows.cmd`，或在 PowerShell 中执行：
 
 ```powershell
-cmake -S . -B build -DCMAKE_PREFIX_PATH="C:/Qt/6.x.x/msvc2022_64"
-cmake --build build --config Release
-.\build\Release\pettime.exe
+.\build-windows.cmd
 ```
 
-分发前，使用该 Qt 套件的 `windeployqt` 部署运行库和平台插件，并附带许可材料。C++ 版本已替换旧 C# 源码和 CMD/PowerShell 启动入口，旧实现可从 Git 历史查看。
+脚本默认使用 `C:\msys64\ucrt64` 中的 GCC、CMake、Ninja、Qt 6、`windeployqt6` 和 `objdump`。自动配置 Release 并设置 `BUILD_TESTING=OFF`，编译后调用 `package-windows.ps1` 生成：
+
+```text
+build-windows\Pettime-windows-x64.zip
+```
+
+仓库只提交构建脚本、源代码和文档，不提交实际编译产物。默认的 `build-windows/` 已被 `.gitignore` 排除，其中的 EXE、DLL、ZIP 和构建缓存仅保留在本地。自定义输出目录时也应保持产物不被 Git 跟踪。
+
+**分发这个 ZIP，完整解压后双击其中的 `Pettime-windows-x64\pettime.exe`。** 接收方不需要安装 Qt、MSYS2 或修改 PATH。不要单独复制构建目录根部的裸 EXE，也不要直接在压缩包浏览器内启动程序。
+
+分发包包含 Qt 运行库、Windows 平台插件、其他 Qt 插件、GCC 运行库、递归收集的第三方 DLL，以及动态加载的 OpenSSL DLL；同时附带许可文本、说明和 SHA-256 文件清单。`qt.conf` 将插件路径设为包内目录。每次从全新临时目录打包，避免旧 DLL 混入；遇到未解析的非系统 DLL 或部署失败会报错，不生成新的成功包。成功后覆盖同名 ZIP，失败时原有 ZIP 可能仍在，应以脚本成功提示为准。
+
+不构建或运行项目测试，不启动程序，也不安装软件或修改系统环境变量。配置、编译或打包失败时返回非零退出码；不带参数运行会在结束时暂停，方便查看结果。
+
+如果工具链安装在其他位置，可设置当前终端的 `PETTIME_UCRT64`；第一个参数可指定输出目录（带参数时不暂停）。请使用同一套 UCRT64 编译器和 Qt，且不要复用其他工具链生成的构建目录：
+
+```powershell
+$env:PETTIME_UCRT64 = 'D:\msys64\ucrt64'
+.\build-windows.cmd .\build-windows-custom
+```
+
+2026-09-29 使用 GCC 16.2.0、CMake 4.4.3、Ninja 1.13.2、Qt 6.11.2 完成构建和打包。实际 ZIP 已解压核查 DLL 依赖，并在仅含 Windows 系统目录的 PATH 下成功执行 `--version`；未运行项目测试，桌面交互和网络功能尚未完整验收。详见 [验证记录](VALIDATION.md)。
+
+C++ 版本已替换旧 C# 实现，旧实现可从 Git 历史查看。
 
 ## 操作与行为
 
@@ -67,7 +88,7 @@ cmake --build build --config Release
 - 端口占用时显示错误并回滚整个启动操作。仅接受参与网卡直接连接子网内的 IPv4 来源，局域网 socket 使用直连，不经过系统代理。
 - 最多保持 64 个已连接对端；支持下述自有实体派遣，不包含公网发现、认证或加密。仅用于可信局域网。
 
-设备随机 ID 保存在 `network-device-id.dat`，与好感度存档位于同一目录；会话 ID 每次开启重新生成。不要把同一设备 ID 存档复制给不同机器。防火墙需允许 TCP/UDP 21012，路由器的客户端隔离也可能阻止发现；程序不会修改这些设置。已在两台 Ubuntu 24.04 X11 实体设备上验证局域网派遣与断线恢复；Windows 尚未实际编译或运行验收。
+设备随机 ID 保存在 `network-device-id.dat`，与好感度存档位于同一目录；会话 ID 每次开启重新生成。不要把同一设备 ID 存档复制给不同机器。防火墙需允许 TCP/UDP 21012，路由器的客户端隔离也可能阻止发现；程序不会修改这些设置。已在两台 Ubuntu 24.04 X11 实体设备上验证局域网派遣与断线恢复；Windows 已通过编译，尚未完成运行验收。
 
 ### 派遣与召回
 

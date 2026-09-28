@@ -6,7 +6,11 @@ The original copyright and MIT license are retained in `LICENSE`. The existing P
 The C++ application uses Qt 6 Core, Gui, Widgets and Network, and Qt Test for development.
 Qt is a separate dependency, not covered by Pettime's MIT license. Use these modules under
 their applicable LGPL v3 / GPL terms or a commercial Qt license. This project defaults to
-the shared Qt libraries supplied by the operating system; it does not vendor or modify Qt.
+shared Qt libraries. Linux builds use system libraries; the Windows packaging script copies
+Qt, its plugins and their runtime dependencies from the selected MSYS2 UCRT64 installation.
+The ZIP includes the installed license texts in `licenses/` and a SHA-256 file manifest.
+MSYS2 package metadata and source build recipes are available at https://packages.msys2.org/.
+Qt source archives are available at https://download.qt.io/official_releases/qt/.
 
 When redistributing Qt binaries, include the applicable Qt and third-party notices and
 license texts, provide corresponding Qt source or a compliant source offer, and preserve
