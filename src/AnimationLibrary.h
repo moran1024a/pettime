@@ -1,5 +1,5 @@
 #pragma once
-#include "PetModel.h"
+#include "PetRenderState.h"
 #include <QImage>
 #include <QString>
 #include <vector>
@@ -9,6 +9,7 @@ class AnimationLibrary {
   public:
     AnimationLibrary();
     QImage render(const PetModel &pet, int canvas = 320, double dpr = 1) const;
+    QImage render(const PetRenderState &pet, int canvas = 320, double dpr = 1) const;
     bool exportFrames(const QString &directory, QString *error) const;
     static QRect alphaBounds(const QImage &image, int threshold = 24, int padding = 3);
     std::vector<QImage> walk, idle, nymph, nymphIdle, pounce, frontPounce, crush, nymphCrush,

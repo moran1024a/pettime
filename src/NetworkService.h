@@ -6,6 +6,7 @@
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QObject>
+#include <QQueue>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -21,12 +22,15 @@ class NetworkService : public QObject {
     struct Info {
         int count = 1;
         int limit = 72;
+        int dispatched = 0, visitors = 0;
     };
     struct Device {
         QString id, name, address, state;
         quint16 port = 0;
         int count = 0, limit = 0;
         QDateTime lastContact;
+        bool dispatch = false;
+        int dispatched = 0, visitors = 0;
     };
     // Nondefault options are for isolated integration tests, not application settings.
     struct Options {
@@ -42,6 +46,13 @@ class NetworkService : public QObject {
     bool start();
     void stop();
     void refresh();
+    void enableDispatch() { dispatchEnabled_ = true; }
+    QString deviceId() const { return id_; }
+    QString sessionId() const { return session_; }
+    QString peerSession(const QString &peer) const;
+    bool dispatchReady(const QString &peer) const;
+    bool sendDispatch(const QString &peer, QJsonObject message, const QString &replaceKey = {});
+    void disconnectPeer(const QString &peer);
     bool running() const { return running_; }
     QString status() const { return status_; }
     QStringList addresses() const;
@@ -50,6 +61,10 @@ class NetworkService : public QObject {
     quint16 port() const { return options_.port; }
   signals:
     void changed();
+    void peerReady(QString peer, QString session);
+    void peerLost(QString peer);
+    void dispatchMessage(QString peer, QString session, QJsonObject message);
+    void stopping();
 
   private:
     friend class NetworkTest;
@@ -75,6 +90,14 @@ class NetworkService : public QObject {
         qint64 pingAt = 0, queryAt = 0, rateAt = 0;
         int frames = 0;
         QJsonObject pendingInfo;
+        bool dispatch = false;
+        QQueue<QJsonObject> controls;
+        QHash<QString, QJsonObject> updates;
+        QQueue<QString> updateOrder;
+        qint64 txAt = 0;
+        int txFrames = 0, txBytes = 0;
+        qint64 creditAt = 0;
+        double frameCredit = 256, byteCredit = 524288;
         QHash<QString, qint64> lateQueries;
     };
     qint64 now() const;
@@ -89,6 +112,7 @@ class NetworkService : public QObject {
     bool handle(Connection &c, const QJsonObject &object);
     void drop(QTcpSocket *socket, const QString &reason);
     bool send(QTcpSocket *socket, QJsonObject object);
+    void flushDispatch(Connection &c);
     QJsonObject localData();
     bool applyInfo(Peer &peer, const QJsonObject &object);
     void markReady(Connection &c);
@@ -108,7 +132,7 @@ class NetworkService : public QObject {
     QString id_, session_, status_ = "已关闭";
     Info previous_;
     double revision_ = 1, publishedRevision_ = 0;
-    bool running_ = false;
+    bool running_ = false, dispatchEnabled_ = false;
     qint64 nextDiscovery_ = 0, nextSample_ = 0, lastRefresh_ = -1000;
 };
 } // namespace pettime

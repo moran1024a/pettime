@@ -47,10 +47,42 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     swarm_.setLimit(options_.smoke ? 72 : store_.loadLimit(&limitWarning));
     if (!limitWarning.isEmpty())
         startupWarning_ += "\n" + limitWarning;
-    swarm_.beforeRemove = [this](std::uint64_t id) { windows_.erase(id); };
+    swarm_.beforeRemove = [this](std::uint64_t id) {
+        if (dispatch_)
+            dispatch_->removeEntity(id);
+        windows_.erase(id);
+    };
     network_ = std::make_unique<NetworkService>(store_, [this] {
-        return NetworkService::Info{swarm_.totalCount(), swarm_.limit()};
+        return NetworkService::Info{swarm_.totalCount(), swarm_.limit(),
+                                    dispatch_ ? int(dispatch_->outgoing().size()) : 0,
+                                    dispatch_ ? int(dispatch_->visitors().size()) : 0};
     });
+    dispatch_ = std::make_unique<DispatchController>(*network_, swarm_, [] {
+        auto *screen = QGuiApplication::primaryScreen();
+        return screen ? QRectF(screen->availableGeometry()) : QRectF{};
+    });
+    connect(dispatch_.get(), &DispatchController::changed, this, [this] {
+        // Defer reconciliation: a removal callback may still be traversing the swarm.
+        QTimer::singleShot(0, this, [this] {
+            reconcileWindows();
+            reconcileVisitors();
+            refreshPets();
+        });
+    });
+    connect(dispatch_.get(), &DispatchController::notice, this, [this](const QString &text) {
+        store_.log(text);
+        if (dispatchStatus_)
+            dispatchStatus_->setText(text);
+        if (tray_.isVisible())
+            tray_.showMessage("网络派遣", text);
+    });
+    connect(dispatch_.get(), &DispatchController::visitorHighlight, this,
+            [this](const QString &id) {
+                reconcileVisitors();
+                auto it = visitorWindows_.find(id);
+                if (it != visitorWindows_.end())
+                    it->second->highlight();
+            });
     makeMenu();
     connect(&mainWindow_, &PetWindow::contextRequested, this, [this](QPoint point) {
         contextPet_ = 1;
@@ -76,13 +108,15 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
 }
 ApplicationController::~ApplicationController() {
     timer_.stop();
+    dispatch_->shutdown();
     network_->stop();
     tray_.hide();
     if (dirty_)
         persist();
 }
 void ApplicationController::showNetwork() {
-    if (!networkPanel_) networkPanel_ = std::make_unique<NetworkPanel>(*network_);
+    if (!networkPanel_)
+        networkPanel_ = std::make_unique<NetworkPanel>(*network_);
     networkPanel_->show();
     networkPanel_->raise();
     networkPanel_->activateWindow();
@@ -172,7 +206,8 @@ void ApplicationController::refreshMenu() {
     retry_->setVisible(dirty_);
 }
 std::uint64_t ApplicationController::selectedPet() const {
-    if (!petTable_ || petTable_->currentRow() < 0)
+    if (!petTable_ || petTable_->selectionModel()->selectedRows().size() != 1 ||
+        petTable_->currentRow() < 0)
         return 0;
     auto *item = petTable_->item(petTable_->currentRow(), 0);
     return item ? item->data(Qt::UserRole).toULongLong() : 0;
@@ -196,14 +231,15 @@ void ApplicationController::showPets() {
     if (!petDialog_) {
         petDialog_ = std::make_unique<QDialog>();
         petDialog_->setWindowTitle("蟑螂列表");
-        petDialog_->resize(580, 420);
+        petDialog_->resize(920, 460);
         auto *layout = new QVBoxLayout(petDialog_.get());
         petCount_ = new QLabel;
         layout->addWidget(petCount_);
-        petTable_ = new QTableWidget(0, 4);
-        petTable_->setHorizontalHeaderLabels({"编号", "名称", "身份", "状态"});
+        petTable_ = new QTableWidget(0, 6);
+        petTable_->setHorizontalHeaderLabels(
+            {"编号", "名称", "归属／来源", "动作", "所在设备", "派遣状态"});
         petTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
-        petTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+        petTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         petTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
         petTable_->verticalHeader()->hide();
         petTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -216,6 +252,23 @@ void ApplicationController::showPets() {
         for (auto *button : {renamePet_, highlightPet_, feedPet_})
             buttons->addWidget(button);
         layout->addLayout(buttons);
+        auto *dispatchButtons = new QHBoxLayout;
+        dispatchPet_ = new QPushButton("派遣…");
+        recallPet_ = new QPushButton("召回");
+        recallAllPets_ = new QPushButton("全部召回");
+        for (auto *button : {dispatchPet_, recallPet_, recallAllPets_})
+            dispatchButtons->addWidget(button);
+        layout->addLayout(dispatchButtons);
+        dispatchStatus_ = new QLabel;
+        dispatchStatus_->setTextFormat(Qt::PlainText);
+        dispatchStatus_->setWordWrap(true);
+        layout->addWidget(dispatchStatus_);
+        connect(dispatchPet_, &QPushButton::clicked, this,
+                &ApplicationController::dispatchSelected);
+        connect(recallPet_, &QPushButton::clicked, this,
+                [this] { dispatch_->recallPet(selectedPet()); });
+        connect(recallAllPets_, &QPushButton::clicked, dispatch_.get(),
+                &DispatchController::recallAll);
         layout->addWidget(new QLabel("此处投喂仅播放动画，不增加好感度。名称仅在本次运行保留。"));
         connect(petTable_, &QTableWidget::itemSelectionChanged, this,
                 &ApplicationController::refreshPets);
@@ -234,14 +287,17 @@ void ApplicationController::showPets() {
         });
         connect(highlightPet_, &QPushButton::clicked, this, [this] {
             const auto id = selectedPet();
-            if (id == 1)
+            if (dispatch_->isAway(id))
+                dispatch_->highlightPet(id);
+            else if (id == 1)
                 mainWindow_.highlight();
             else if (auto it = windows_.find(id); it != windows_.end())
                 it->second->highlight();
         });
         connect(feedPet_, &QPushButton::clicked, this, [this] {
-            if (auto *p = swarm_.find(selectedPet()))
-                p->playFeeding();
+            if (dispatch_->canControl(selectedPet()))
+                if (auto *p = swarm_.find(selectedPet()))
+                    p->playFeeding();
             refreshPets();
         });
     }
@@ -255,45 +311,129 @@ void ApplicationController::showPets() {
     petDialog_->raise();
     petDialog_->activateWindow();
 }
+void ApplicationController::dispatchSelected() {
+    QList<quint64> ids;
+    for (const auto &index : petTable_->selectionModel()->selectedRows()) {
+        const auto id = petTable_->item(index.row(), 0)->data(Qt::UserRole).toULongLong();
+        if (id)
+            ids.append(id);
+    }
+    QStringList choices, peers;
+    for (const auto &d : network_->devices()) {
+        if (!network_->dispatchReady(d.id))
+            continue;
+        choices.append(QString("%1 — %2:%3（剩余访客名额约 %4）")
+                           .arg(d.name, d.address)
+                           .arg(d.port)
+                           .arg(DispatchController::VisitorLimit - d.visitors));
+        peers.append(d.id);
+    }
+    if (choices.isEmpty()) {
+        warn("没有支持派遣的在线设备，请在双方网络面板中开启服务。");
+        return;
+    }
+    bool ok = false;
+    const auto choice =
+        QInputDialog::getItem(petDialog_.get(), "派遣到设备", "目标设备", choices, 0, false, &ok);
+    if (!ok)
+        return;
+    const auto text = dispatch_->dispatchPets(ids, peers.at(choices.indexOf(choice)));
+    dispatchStatus_->setText(text);
+    refreshPets();
+}
 void ApplicationController::refreshPets() {
     if (!petTable_)
         return;
-    const auto selected = selectedPet();
+    QSet<QString> selected;
+    QString current;
+    for (const auto &index : petTable_->selectionModel()->selectedRows())
+        selected.insert(petTable_->item(index.row(), 0)->data(Qt::UserRole + 1).toString());
+    if (petTable_->currentRow() >= 0 && petTable_->item(petTable_->currentRow(), 0))
+        current = petTable_->item(petTable_->currentRow(), 0)->data(Qt::UserRole + 1).toString();
     const QSignalBlocker blocker(petTable_);
-    petCount_->setText(
-        QString("当前 %1 只 / 上限 %2").arg(swarm_.totalCount()).arg(swarm_.limit()));
-    petTable_->setRowCount(swarm_.totalCount());
-    int row = 0, selectedRow = -1;
+    petCount_->setText(QString("自有 %1 / %2 · 派出 %3 · 访客 %4 / %5")
+                           .arg(swarm_.totalCount())
+                           .arg(swarm_.limit())
+                           .arg(dispatch_->outgoing().size())
+                           .arg(dispatch_->visitors().size())
+                           .arg(DispatchController::VisitorLimit));
+    petTable_->setRowCount(swarm_.totalCount() + dispatch_->visitors().size());
+    petTable_->clearSelection();
+    petTable_->setCurrentCell(-1, -1);
+    int row = 0;
     const QStringList states{"休息", "爬行", "疾走", "躲避", "进食", "开心",
                              "起飞", "飞行", "俯冲", "回弹", "踩扁", "退场"};
-    for (const auto &p : swarm_.pets()) {
-        const QStringList values{
-            QString::number(p->id), p->displayName(), p->primary ? "主实体" : "普通",
-            p->cosmeticFeeding ? "投喂动画" : states.at(static_cast<int>(p->state))};
-        for (int col = 0; col < 4; ++col) {
+    auto add = [&](const QStringList &values, quint64 id, const QString &key) {
+        for (int col = 0; col < values.size(); ++col) {
             auto *item = petTable_->item(row, col);
             if (!item) {
                 item = new QTableWidgetItem;
                 petTable_->setItem(row, col, item);
             }
             item->setText(values[col]);
-            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(p->id));
+            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
+            item->setData(Qt::UserRole + 1, key);
         }
-        if (p->id == selected)
-            selectedRow = row;
+        if (selected.contains(key))
+            petTable_->selectionModel()->select(petTable_->model()->index(row, 0),
+                                                QItemSelectionModel::Select |
+                                                    QItemSelectionModel::Rows);
+        if (key == current)
+            petTable_->selectionModel()->setCurrentIndex(petTable_->model()->index(row, 0),
+                                                         QItemSelectionModel::NoUpdate);
         ++row;
+    };
+    for (const auto &p : swarm_.pets())
+        add({QString::number(p->id), p->displayName(), p->primary ? "主实体" : "自有",
+             p->cosmeticFeeding ? "投喂动画" : states.at(int(p->state)), dispatch_->location(p->id),
+             dispatch_->stateText(p->id)},
+            p->id, "local:" + QString::number(p->id));
+    auto keys = dispatch_->visitors().keys();
+    std::sort(keys.begin(), keys.end());
+    for (const auto &key : keys) {
+        const auto &v = dispatch_->visitors()[key];
+        add({v.entity, v.name, "访客 · " + v.sourceName, states.at(int(v.current.state)), "本机",
+             !v.active  ? "预留中"
+             : v.frozen ? "等待重连"
+                        : "只读访客"},
+            0, "visitor:" + key);
     }
-    if (selectedRow >= 0)
-        petTable_->selectRow(selectedRow);
-    else {
-        petTable_->clearSelection();
-        petTable_->setCurrentCell(-1, -1);
-    }
-    const auto *p = swarm_.find(selected);
+    const auto id = selectedPet();
+    const auto *p = swarm_.find(id);
     renamePet_->setEnabled(p && !p->primary);
-    highlightPet_->setEnabled(p != nullptr);
-    feedPet_->setEnabled(p && p->active() && !p->mealActive && !p->cosmeticFeeding &&
-                         !p->frontal());
+    highlightPet_->setEnabled(p && dispatch_->canControl(id));
+    feedPet_->setEnabled(p && dispatch_->canControl(id) && p->active() && !p->mealActive &&
+                         !p->cosmeticFeeding && !p->frontal());
+    bool eligible = !selected.isEmpty();
+    for (const auto &index : petTable_->selectionModel()->selectedRows()) {
+        const auto n = petTable_->item(index.row(), 0)->data(Qt::UserRole).toULongLong();
+        const auto *candidate = swarm_.find(n);
+        if (!candidate || candidate->primary || !candidate->active() ||
+            dispatch_->outgoing().contains(n))
+            eligible = false;
+    }
+    dispatchPet_->setEnabled(eligible);
+    recallPet_->setEnabled(p && dispatch_->outgoing().contains(id));
+    recallAllPets_->setEnabled(!dispatch_->outgoing().isEmpty());
+}
+void ApplicationController::reconcileVisitors() {
+    for (auto it = visitorWindows_.begin(); it != visitorWindows_.end();) {
+        if (!dispatch_->visitors().contains(it->first) || !dispatch_->visitors()[it->first].active)
+            it = visitorWindows_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = dispatch_->visitors().cbegin(); it != dispatch_->visitors().cend(); ++it) {
+        const auto &v = it.value();
+        if (!v.active)
+            continue;
+        auto &window = visitorWindows_[it.key()];
+        if (!window)
+            window = std::make_unique<PetWindow>(animation_);
+        window->presentRemote(dispatch_->interpolated(v), v.name, v.frozen);
+        if (!window->isVisible())
+            window->show();
+    }
 }
 void ApplicationController::start() {
     store_.log("Starting Qt " + QString::fromLatin1(qVersion()) +
@@ -349,12 +489,14 @@ void ApplicationController::persist() {
 void ApplicationController::updateScreens() {
     primary_.setArea(areaAt(primary_.position));
     for (const auto &p : swarm_.pets())
-        p->setArea(areaAt(p->position));
+        if (!dispatch_->isAway(p->id))
+            p->setArea(areaAt(p->position));
 }
 void ApplicationController::reconcileWindows() {
     std::set<std::uint64_t> alive;
     for (const auto &p : swarm_.pets())
-        alive.insert(p->id);
+        if (!dispatch_->isAway(p->id))
+            alive.insert(p->id);
     for (auto it = windows_.begin(); it != windows_.end();) {
         if (!alive.count(it->first))
             it = windows_.erase(it);
@@ -362,7 +504,7 @@ void ApplicationController::reconcileWindows() {
             ++it;
     }
     for (const auto &p : swarm_.pets()) {
-        if (p->primary)
+        if (p->primary || dispatch_->isAway(p->id))
             continue;
         if (!windows_.count(p->id)) {
             p->setArea(areaAt(p->position));
@@ -386,6 +528,13 @@ void ApplicationController::tick() {
     const double elapsed = std::max(0.0, now - last_);
     last_ = now;
     const double dt = elapsed;
+    dispatch_->tick();
+    if (now >= nextVisitors_) {
+        reconcileVisitors();
+        const int visibleCount = int(dispatch_->visitors().size()) + swarm_.totalCount() -
+                                 int(dispatch_->outgoing().size());
+        nextVisitors_ = now + (visibleCount >= 48 ? .066 : visibleCount >= 24 ? .05 : .033);
+    }
     const int before = primary_.affection;
     primary_.menuOpen = menu_.isVisible();
     primary_.advance(dt, options_.smoke ? QPointF(-100000, -100000) : QPointF(QCursor::pos()));

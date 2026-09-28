@@ -1,6 +1,7 @@
 #include "SwarmController.h"
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace pettime {
 SwarmController::SwarmController(std::uint32_t seed, QPointF center, QRectF area) : rng_(seed) {
@@ -46,13 +47,13 @@ void SwarmController::spawn(QPointF center, QRectF area, int generation, int cou
     pump();
 }
 void SwarmController::advance(double dt) {
-    std::vector<QPointF> neighbors;
+    std::map<QString, std::vector<QPointF>> neighbors;
     for (const auto &p : pets_)
         if (p->active())
-            neighbors.push_back(p->position);
+            neighbors[p->motionGroup].push_back(p->position);
     for (auto &p : pets_)
-        if (!p->primary)
-            p->advance(dt, {}, neighbors);
+        if (!p->primary && !p->dispatchPaused)
+            p->advance(dt, {}, neighbors[p->motionGroup]);
     // Notify window owners before destroying expired models; never remove the primary.
     for (auto &p : pets_)
         if (!p->primary && p->splitReady) {
@@ -65,6 +66,12 @@ void SwarmController::advance(double dt) {
 }
 void SwarmController::pump() {
     while (!pending_.empty()) {
+        // Retirement is ownership cleanup, not remote simulation; a lost connection must
+        // not leave a fading entity permanently reserving a birth slot.
+        for (auto &p : pets_)
+            if (!p->primary && p->dispatchPaused && p->state == State::Fade)
+                p->expired = true;
+        eraseExpired();
         const auto b = pending_.front();
         int requested = 0;
         for (const auto &pending : pending_)
@@ -79,10 +86,17 @@ void SwarmController::pump() {
                 if (retiring >= excess)
                     break;
                 if (!p->primary && p->active()) {
-                    p->retire();
+                    if (p->dispatchPaused)
+                        p->expired = true;
+                    else
+                        p->retire();
                     ++retiring;
                 }
             }
+            const int before = totalCount();
+            eraseExpired();
+            if (totalCount() < before)
+                continue;
             return;
         }
         pending_.pop_front();

@@ -11,7 +11,9 @@ class PetWindow : public QWidget {
     Q_OBJECT
   public:
     PetWindow(PetModel &model, const AnimationLibrary &animation);
+    explicit PetWindow(const AnimationLibrary &animation);
     void present();
+    void presentRemote(const PetRenderState &state, const QString &name, bool frozen);
     void highlight();
     const QImage &image() const { return image_; }
     int paintedFrames() const { return painted_; }
@@ -30,7 +32,11 @@ class PetWindow : public QWidget {
     void closeEvent(QCloseEvent *) override;
 
   private:
-    PetModel &model_;
+    PetModel *model_ = nullptr;
+    PetRenderState remote_;
+    QString remoteName_;
+    bool frozen_ = false;
+    qint64 highlightElapsed_ = 0;
     const AnimationLibrary &animation_;
     QImage image_;
     QRegion mask_;

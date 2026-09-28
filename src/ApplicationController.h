@@ -1,8 +1,9 @@
 #pragma once
 #include "AnimationLibrary.h"
 #include "CrackWindow.h"
-#include "PetWindow.h"
+#include "DispatchController.h"
 #include "NetworkPanel.h"
+#include "PetWindow.h"
 #include "SettingsStore.h"
 #include "SwarmController.h"
 #include <QDialog>
@@ -33,11 +34,14 @@ class ApplicationController : public QObject {
     void recall();
 
   private:
+    friend class DispatchTest;
     void tick();
     void makeMenu();
     void showPets();
     void showNetwork();
     void refreshPets();
+    void dispatchSelected();
+    void reconcileVisitors();
     void changeLimit();
     std::uint64_t selectedPet() const;
     void refreshMenu();
@@ -56,11 +60,14 @@ class ApplicationController : public QObject {
     CrackWindow crack_;
     std::map<std::uint64_t, std::unique_ptr<PetWindow>> windows_;
     std::unique_ptr<NetworkService> network_;
+    std::unique_ptr<DispatchController> dispatch_;
+    std::map<QString, std::unique_ptr<PetWindow>> visitorWindows_;
     std::unique_ptr<NetworkPanel> networkPanel_;
     std::unique_ptr<QDialog> petDialog_;
     QTableWidget *petTable_ = nullptr;
-    QLabel *petCount_ = nullptr;
+    QLabel *petCount_ = nullptr, *dispatchStatus_ = nullptr;
     QPushButton *renamePet_ = nullptr, *highlightPet_ = nullptr, *feedPet_ = nullptr;
+    QPushButton *dispatchPet_ = nullptr, *recallPet_ = nullptr, *recallAllPets_ = nullptr;
     std::uint64_t contextPet_ = 1;
     QMenu menu_;
     QSystemTrayIcon tray_;
@@ -68,7 +75,7 @@ class ApplicationController : public QObject {
             *retry_ = nullptr, *limitAction_ = nullptr;
     QTimer timer_;
     QElapsedTimer clock_;
-    double last_ = 0, lastSwarm_ = 0, nextSwarm_ = 0, retryAt_ = 0;
+    double last_ = 0, lastSwarm_ = 0, nextSwarm_ = 0, nextVisitors_ = 0, retryAt_ = 0;
     double totalTickMs_ = 0, maxTickMs_ = 0;
     int ticks_ = 0, swarmUpdates_ = 0, recalls_ = 0, impacts_ = 0;
     bool dirty_ = false, saveWarning_ = false, smokePounce_ = false;

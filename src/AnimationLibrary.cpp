@@ -398,6 +398,9 @@ QImage AnimationLibrary::frontFrame(const std::vector<QImage> &poses, int i) con
 }
 
 QImage AnimationLibrary::render(const PetModel &m, int size, double dpr) const {
+    return render(PetRenderState::from(m), size, dpr);
+}
+QImage AnimationLibrary::render(const PetRenderState &m, int size, double dpr) const {
     const bool moving = !m.paused && !m.dragging && !m.menuOpen && m.speed > 3;
     const QImage *frame = nullptr;
     auto cyclic = [](double phase, const std::vector<QImage> &frames) -> const QImage * {

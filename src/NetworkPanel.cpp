@@ -18,10 +18,10 @@ NetworkPanel::NetworkPanel(NetworkService &service, QWidget *parent)
     local_ = new QLabel(this);
     local_->setTextFormat(Qt::PlainText);
     local_->setWordWrap(true);
-    table_ = new QTableWidget(0, 7, this);
+    table_ = new QTableWidget(0, 10, this);
     table_->setObjectName("networkDevices");
-    table_->setHorizontalHeaderLabels(
-        {"设备名", "IP", "端口", "数量", "上限", "连接状态", "最后通讯"});
+    table_->setHorizontalHeaderLabels({"设备名", "IP", "端口", "数量", "上限", "连接状态",
+                                       "最后通讯", "派出", "访客 / 144", "派遣能力"});
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -62,12 +62,15 @@ void NetworkPanel::updateView() {
     status_->setText(service_.status());
     const auto info = service_.localInfo();
     local_->setText(
-        QString("本机：%1  |  数量：%2 / %3\nIPv4：%4  |  TCP / UDP：%5")
+        QString(
+            "本机：%1  |  数量：%2 / %3\nIPv4：%4  |  TCP / UDP：%5\n派出：%6  |  访客：%7 / 144")
             .arg(QSysInfo::machineHostName())
             .arg(info.count)
             .arg(info.limit)
             .arg(service_.addresses().isEmpty() ? "未开启" : service_.addresses().join(", "))
-            .arg(service_.port()));
+            .arg(service_.port())
+            .arg(info.dispatched)
+            .arg(info.visitors));
     QString selected;
     if (table_->currentRow() >= 0 && table_->item(table_->currentRow(), 0))
         selected = table_->item(table_->currentRow(), 0)->data(Qt::UserRole).toString();
@@ -84,8 +87,10 @@ void NetworkPanel::updateView() {
                                  d.count ? QString::number(d.count) : "—",
                                  d.limit ? QString::number(d.limit) : "—",
                                  d.state,
-                                 d.lastContact.isValid() ? d.lastContact.toString("HH:mm:ss")
-                                                         : "—"};
+                                 d.lastContact.isValid() ? d.lastContact.toString("HH:mm:ss") : "—",
+                                 QString::number(d.dispatched),
+                                 QString::number(d.visitors),
+                                 d.dispatch ? "支持" : "不支持或未握手"};
         for (int col = 0; col < values.size(); ++col) {
             auto *item = table_->item(row, col);
             if (!item) {

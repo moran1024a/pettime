@@ -36,6 +36,8 @@ class PetModel {
     QString displayName() const;
     std::uint64_t id = 0;
     QString customName;
+    QString motionGroup; // Empty means the local desktop.
+    bool dispatchPaused = false;
     bool cosmeticFeeding = false;
     double cosmeticAge = 0;
     void demoPounce();

@@ -1,4 +1,5 @@
 #include "NetworkService.h"
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkDatagram>
 #include <QNetworkInterface>
@@ -148,6 +149,16 @@ bool NetworkService::start() {
     return true;
 }
 void NetworkService::stop() {
+    if (running_) {
+        emit stopping();
+        // One bounded end-of-session message also covers recalls still queued behind traffic.
+        for (auto *socket : connections_.keys()) {
+            const auto c = connections_.value(socket);
+            if (c && c->ready && c->dispatch &&
+                send(socket, {{"type", "dispatch"}, {"op", "closing"}}))
+                socket->flush();
+        }
+    }
     running_ = false;
     timer_.stop();
     server_.close();
@@ -172,8 +183,10 @@ void NetworkService::discover(bool manual) {
     if (!running_)
         return;
     if (!enumerate()) {
-        stop();
-        status_ = "网络不可用，请恢复网络后重新开启服务。";
+        for (auto *socket : connections_.keys())
+            drop(socket, "网络接口暂时不可用");
+        nextDiscovery_ = now() + 1000;
+        status_ = "网络暂时不可用，正在等待接口恢复。";
         emit changed();
         return;
     }
@@ -368,7 +381,8 @@ void NetworkService::attach(QTcpSocket *socket, bool outbound, const QString &id
 }
 QJsonObject NetworkService::localData() {
     const auto info = snapshot_();
-    if (info.count != previous_.count || info.limit != previous_.limit) {
+    if (info.count != previous_.count || info.limit != previous_.limit ||
+        info.dispatched != previous_.dispatched || info.visitors != previous_.visitors) {
         previous_ = info;
         ++revision_;
     }
@@ -378,7 +392,72 @@ QJsonObject NetworkService::localData() {
             {"tcpPort", options_.port},
             {"petCount", info.count},
             {"petLimit", info.limit},
-            {"revision", revision_}};
+            {"revision", revision_},
+            {"capabilities", dispatchEnabled_ ? QJsonArray{"dispatch-v1"} : QJsonArray{}},
+            {"dispatched", info.dispatched},
+            {"visitors", info.visitors}};
+}
+QString NetworkService::peerSession(const QString &peer) const {
+    return peers_.value(peer).session;
+}
+bool NetworkService::dispatchReady(const QString &peer) const {
+    const auto c = connections_.value(peers_.value(peer).socket);
+    return c && c->ready && c->dispatch;
+}
+void NetworkService::disconnectPeer(const QString &peer) {
+    auto *socket = peers_.value(peer).socket;
+    if (socket)
+        drop(socket, "派遣同步中断");
+}
+bool NetworkService::sendDispatch(const QString &peer, QJsonObject o, const QString &key) {
+    const auto c = connections_.value(peers_.value(peer).socket);
+    if (!c || !c->ready || !c->dispatch)
+        return false;
+    o["type"] = "dispatch";
+    if (QJsonDocument(o).toJson(QJsonDocument::Compact).size() > 8100)
+        return false;
+    if (key.isEmpty()) {
+        if (c->controls.size() >= 256) {
+            drop(c->socket, "派遣控制队列已满");
+            return false;
+        }
+        c->controls.enqueue(o);
+    } else {
+        if (!c->updates.contains(key) && c->updates.size() >= 144)
+            return false;
+        if (!c->updates.contains(key))
+            c->updateOrder.enqueue(key);
+        c->updates[key] = o;
+    }
+    return true;
+}
+void NetworkService::flushDispatch(Connection &c) {
+    if (!c.dispatch)
+        return;
+    if (now() - c.txAt >= 1000) {
+        c.txAt = now();
+        c.txFrames = c.txBytes = 0;
+    }
+    while (c.txFrames < 100 && c.socket->bytesToWrite() < 8192) {
+        bool control = !c.controls.isEmpty();
+        if (!control && c.updates.isEmpty())
+            break;
+        const QString key = control ? QString{} : c.updateOrder.head();
+        const auto o = control ? c.controls.head() : c.updates.value(key);
+        const int bytes = QJsonDocument(o).toJson(QJsonDocument::Compact).size() + 64;
+        if (c.txBytes + bytes > 262144)
+            break;
+        if (control)
+            c.controls.dequeue();
+        else {
+            c.updates.remove(key);
+            c.updateOrder.dequeue();
+        }
+        ++c.txFrames;
+        c.txBytes += bytes;
+        if (!send(c.socket, o))
+            return;
+    }
 }
 bool NetworkService::send(QTcpSocket *socket, QJsonObject o) {
     if (!connections_.contains(socket))
@@ -424,8 +503,12 @@ void NetworkService::read(QTcpSocket *socket) {
             c->rateAt = now();
             c->frames = 0;
         }
-        if (++c->frames > 32 || !doc.isObject() || !envelope(doc.object()) ||
-            !handle(*c, doc.object())) {
+        const auto elapsed = std::max<qint64>(0, now() - c->creditAt);
+        c->creditAt = now();
+        c->frameCredit = std::min(256.0, c->frameCredit + elapsed * .128) - 1;
+        c->byteCredit = std::min(524288.0, c->byteCredit + elapsed * 262.144) - size - 4;
+        if ((c->dispatch ? c->frameCredit < 0 || c->byteCredit < 0 : ++c->frames > 32) ||
+            !doc.isObject() || !envelope(doc.object()) || !handle(*c, doc.object())) {
             drop(socket, "协议校验失败");
             return;
         }
@@ -454,11 +537,14 @@ bool NetworkService::applyInfo(Peer &p, const QJsonObject &o) {
         p.device.count = o["petCount"].toInt();
         p.device.limit = o["petLimit"].toInt();
         p.device.port = quint16(o["tcpPort"].toInt());
+        p.device.dispatched = std::clamp(o["dispatched"].toInt(), 0, 71);
+        p.device.visitors = std::clamp(o["visitors"].toInt(), 0, 144);
     }
     return true;
 }
 void NetworkService::markReady(Connection &c) {
     c.ready = true;
+    peers_[c.peer].device.dispatch = c.dispatch;
     c.readyAt = now();
     c.pingAt = now();
     c.lastRx = now();
@@ -469,6 +555,7 @@ void NetworkService::markReady(Connection &c) {
     p.device.state = "已连接";
     p.device.lastContact = QDateTime::currentDateTime();
     emit changed();
+    emit peerReady(c.peer, c.session);
 }
 bool NetworkService::handle(Connection &c, const QJsonObject &o) {
     const auto type = o["type"].toString();
@@ -498,6 +585,7 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
             p.session = session;
             if (!applyInfo(p, o))
                 return false;
+            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v1");
             c.peer = id;
             c.session = session;
             c.token = o["connectionId"].toString();
@@ -512,6 +600,7 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
             if (!peers_.contains(c.peer) || o["sessionId"] != c.session ||
                 !applyInfo(peers_[c.peer], o))
                 return false;
+            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v1");
             if (!send(c.socket, {{"type", "ready"}, {"connectionId", c.token}}))
                 return false;
             markReady(c);
@@ -522,6 +611,12 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
             return true;
         }
         return false;
+    }
+    if (type == "dispatch") {
+        if (!c.dispatch || !o["op"].isString())
+            return false;
+        emit dispatchMessage(c.peer, c.session, o);
+        return true;
     }
     if (type == "getInfo" && validId(o["requestId"])) {
         auto answer = localData();
@@ -567,6 +662,8 @@ void NetworkService::drop(QTcpSocket *socket, const QString &reason) {
         }
     }
     emit changed();
+    if (!c->peer.isEmpty())
+        emit peerLost(c->peer);
 }
 void NetworkService::tick() {
     if (!running_)
@@ -613,6 +710,9 @@ void NetworkService::tick() {
             drop(socket, "心跳超时");
             continue;
         }
+        flushDispatch(*c);
+        if (!connections_.contains(socket))
+            continue;
         if (time - c->readyAt >= 30000)
             peers_[c->peer].failures = 0;
         if (!c->query.isEmpty() && time - c->queryAt >= 3000) {

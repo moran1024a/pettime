@@ -12,7 +12,7 @@ add_library(pettime_lib STATIC
     src/PetModel.cpp src/SwarmController.cpp src/AnimationLibrary.cpp
     src/PetWindow.cpp src/CrackWindow.cpp src/SettingsStore.cpp
     src/SingleInstance.cpp src/ApplicationController.cpp
-    src/NetworkService.cpp src/NetworkPanel.cpp
+    src/NetworkService.cpp src/NetworkPanel.cpp src/DispatchController.cpp
 )
 target_include_directories(pettime_lib PUBLIC src)
 target_link_libraries(pettime_lib PUBLIC Qt6::Widgets Qt6::Network)
@@ -41,6 +41,12 @@ if(BUILD_TESTING)
         add_executable(desktop_probe tests/DesktopProbe.cpp resources.qrc)
         target_link_libraries(desktop_probe PRIVATE pettime_lib Qt6::Test)
     endif()
+    add_executable(dispatch_probe tests/DispatchProbe.cpp resources.qrc)
+    target_link_libraries(dispatch_probe PRIVATE pettime_lib)
+    add_executable(dispatch_tests tests/TestDispatch.cpp resources.qrc)
+    target_link_libraries(dispatch_tests PRIVATE pettime_lib Qt6::Test)
+    add_test(NAME dispatch_tests COMMAND dispatch_tests)
+    set_tests_properties(dispatch_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_executable(network_tests tests/TestNetwork.cpp)
     target_link_libraries(network_tests PRIVATE pettime_lib Qt6::Test)
     add_test(NAME network_tests COMMAND network_tests)

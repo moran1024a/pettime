@@ -9,12 +9,29 @@ namespace pettime {
 PetWindow::PetWindow(PetModel &model, const AnimationLibrary &animation)
     : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
                            Qt::WindowDoesNotAcceptFocus),
-      model_(model), animation_(animation) {
+      model_(&model), animation_(animation) {
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
     setFocusPolicy(Qt::NoFocus);
     setWindowTitle(model.primary ? "Pettime" : "Pettime · 若虫");
     setFixedSize(model.primary ? 320 : 224, model.primary ? 320 : 224);
+}
+PetWindow::PetWindow(const AnimationLibrary &animation)
+    : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+                           Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput),
+      animation_(animation) {
+    setAttribute(Qt::WA_TranslucentBackground);
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setFocusPolicy(Qt::NoFocus);
+    setWindowTitle("Pettime · 访客");
+    setFixedSize(224, 224);
+}
+void PetWindow::presentRemote(const PetRenderState &state, const QString &name, bool frozen) {
+    remote_ = state;
+    remoteName_ = name;
+    frozen_ = frozen;
+    present();
 }
 QRegion PetWindow::inputRegion(const QImage &source, QSize logicalSize) {
     // A non-zero alpha mask passes only painted pixels to the pet. It also works on
@@ -54,36 +71,29 @@ void PetWindow::highlight() {
             "QLabel { color: #fff176; border: 3px solid #ffd740; border-radius: 35px; padding: "
             "6px; background: rgba(35, 30, 0, 35); }");
     }
+    highlightElapsed_ = 0;
     highlightClock_.restart();
     present();
     highlight_->show();
     highlight_->raise();
 }
 void PetWindow::present() {
-    if (model_.cosmeticFeeding) {
-        PetModel visual = model_;
-        visual.affection = 0;
-        visual.state = model_.cosmeticAge < 1.15 ? State::Food : State::Happy;
-        visual.eating = model_.cosmeticAge < 1.15;
-        visual.mealActive = visual.eating;
-        visual.mealPosition = visual.position;
-        visual.speed = 0;
-        visual.actionAge =
-            model_.cosmeticAge < 1.15 ? model_.cosmeticAge : model_.cosmeticAge - 1.15;
-        image_ = animation_.render(visual, width(), devicePixelRatioF());
-    } else
-        image_ = animation_.render(model_, width(), devicePixelRatioF());
+    const auto state = model_ ? PetRenderState::from(*model_) : remote_;
+    image_ = animation_.render(state, width(), devicePixelRatioF());
     const QRegion region = inputRegion(image_, size());
     if (region != mask_) {
         mask_ = region;
         setMask(mask_);
     }
-    move(qRound(model_.position.x() - width() * .5), qRound(model_.position.y() - height() * .5));
+    move(qRound(state.position.x() - width() * .5), qRound(state.position.y() - height() * .5));
     if (highlight_) {
-        if (highlightClock_.elapsed() >= 3000)
+        const auto elapsed = highlightClock_.restart();
+        if (!frozen_)
+            highlightElapsed_ += elapsed;
+        if (highlightElapsed_ >= 3000)
             highlight_->hide();
         else {
-            highlight_->setText(model_.displayName());
+            highlight_->setText(model_ ? model_->displayName() : remoteName_);
             highlight_->setGeometry(geometry());
         }
     }
@@ -95,38 +105,47 @@ void PetWindow::paintEvent(QPaintEvent *) {
     ++painted_;
 }
 void PetWindow::mousePressEvent(QMouseEvent *e) {
+    if (!model_)
+        return;
     if (e->button() == Qt::RightButton) {
         emit contextRequested(e->globalPosition().toPoint());
         return;
     }
-    if (e->button() == Qt::LeftButton && model_.primary && model_.active()) {
-        model_.dragging = true;
-        model_.speed = 0;
-        dragOffset_ = e->globalPosition() - model_.position;
+    if (e->button() == Qt::LeftButton && model_->primary && model_->active()) {
+        model_->dragging = true;
+        model_->speed = 0;
+        dragOffset_ = e->globalPosition() - model_->position;
     }
 }
 void PetWindow::mouseMoveEvent(QMouseEvent *e) {
-    if (!model_.dragging)
+    if (!model_)
+        return;
+    if (!model_->dragging)
         return;
     QScreen *screen = QGuiApplication::screenAt(e->globalPosition().toPoint());
-    model_.moveTo(e->globalPosition() - dragOffset_,
-                  screen ? QRectF(screen->availableGeometry()) : model_.area);
+    model_->moveTo(e->globalPosition() - dragOffset_,
+                   screen ? QRectF(screen->availableGeometry()) : model_->area);
     present();
 }
 void PetWindow::mouseReleaseEvent(QMouseEvent *e) {
+    if (!model_)
+        return;
     if (e->button() == Qt::LeftButton)
-        model_.dragging = false;
+        model_->dragging = false;
 }
 void PetWindow::mouseDoubleClickEvent(QMouseEvent *e) {
-    if (e->button() == Qt::LeftButton && model_.active()) {
-        model_.dragging = false;
-        model_.crush();
+    if (!model_)
+        return;
+    if (e->button() == Qt::LeftButton && model_->active()) {
+        model_->dragging = false;
+        model_->crush();
         emit crushed();
         present();
     }
 }
 void PetWindow::closeEvent(QCloseEvent *e) {
     e->ignore();
-    emit exitRequested();
+    if (model_)
+        emit exitRequested();
 }
 } // namespace pettime
