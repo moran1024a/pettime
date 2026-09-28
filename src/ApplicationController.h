@@ -2,6 +2,7 @@
 #include "AnimationLibrary.h"
 #include "CrackWindow.h"
 #include "PetWindow.h"
+#include "NetworkPanel.h"
 #include "SettingsStore.h"
 #include "SwarmController.h"
 #include <QDialog>
@@ -35,6 +36,7 @@ class ApplicationController : public QObject {
     void tick();
     void makeMenu();
     void showPets();
+    void showNetwork();
     void refreshPets();
     void changeLimit();
     std::uint64_t selectedPet() const;
@@ -53,6 +55,8 @@ class ApplicationController : public QObject {
     PetWindow mainWindow_;
     CrackWindow crack_;
     std::map<std::uint64_t, std::unique_ptr<PetWindow>> windows_;
+    std::unique_ptr<NetworkService> network_;
+    std::unique_ptr<NetworkPanel> networkPanel_;
     std::unique_ptr<QDialog> petDialog_;
     QTableWidget *petTable_ = nullptr;
     QLabel *petCount_ = nullptr;

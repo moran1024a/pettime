@@ -8,6 +8,7 @@ class SettingsStore {
     bool saveAffinity(int value, QString *error = nullptr) const;
     int loadLimit(QString *warning = nullptr) const;
     bool saveLimit(int value, QString *error = nullptr) const;
+    QString networkDeviceId(QString *error = nullptr) const;
     void log(const QString &message) const;
     QString directory() const { return directory_; }
 

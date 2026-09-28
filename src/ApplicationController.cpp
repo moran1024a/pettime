@@ -48,6 +48,9 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     if (!limitWarning.isEmpty())
         startupWarning_ += "\n" + limitWarning;
     swarm_.beforeRemove = [this](std::uint64_t id) { windows_.erase(id); };
+    network_ = std::make_unique<NetworkService>(store_, [this] {
+        return NetworkService::Info{swarm_.totalCount(), swarm_.limit()};
+    });
     makeMenu();
     connect(&mainWindow_, &PetWindow::contextRequested, this, [this](QPoint point) {
         contextPet_ = 1;
@@ -73,9 +76,16 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
 }
 ApplicationController::~ApplicationController() {
     timer_.stop();
+    network_->stop();
     tray_.hide();
     if (dirty_)
         persist();
+}
+void ApplicationController::showNetwork() {
+    if (!networkPanel_) networkPanel_ = std::make_unique<NetworkPanel>(*network_);
+    networkPanel_->show();
+    networkPanel_->raise();
+    networkPanel_->activateWindow();
 }
 void ApplicationController::makeMenu() {
     pause_ = menu_.addAction("暂停爬行");
@@ -93,6 +103,7 @@ void ApplicationController::makeMenu() {
     menu_.addSeparator();
     menu_.addAction("蟑螂列表…", this, &ApplicationController::showPets);
     limitAction_ = menu_.addAction("数量上限…", this, &ApplicationController::changeLimit);
+    menu_.addAction("网络面板…", this, &ApplicationController::showNetwork);
     menu_.addSeparator();
     QMenu *sizes = menu_.addMenu("大小");
     auto *sizeGroup = new QActionGroup(sizes);

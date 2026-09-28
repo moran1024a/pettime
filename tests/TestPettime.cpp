@@ -261,6 +261,24 @@ class TestPettime : public QObject {
         listAction->trigger();
         QCOMPARE(table->currentRow(), 0);
     }
+    void networkMenuOpensWithoutStartingService() {
+        QTemporaryDir dir;
+        ApplicationController controller(*animation_, SettingsStore(dir.path()), RunOptions{});
+        QAction *networkAction = nullptr;
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *menu = qobject_cast<QMenu *>(widget))
+                for (auto *action : menu->actions())
+                    if (action->text() == "网络面板…") networkAction = action;
+        QVERIFY(networkAction);
+        networkAction->trigger();
+        NetworkPanel *panel = nullptr;
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *candidate = qobject_cast<NetworkPanel *>(widget)) panel = candidate;
+        QVERIFY(panel); QVERIFY(panel->isVisible());
+        QVERIFY(!panel->findChild<QCheckBox *>("networkEnabled")->isChecked());
+        QVERIFY(!QFile::exists(dir.path() + "/network-device-id.dat"));
+        panel->close(); networkAction->trigger(); QVERIFY(panel->isVisible());
+    }
     void screenRecoveryAndDeterminism() {
         PetModel a(42, {1000, 500}, {0, 0, 1920, 1080}), b = a;
         for (int i = 0; i < 1000; ++i) {

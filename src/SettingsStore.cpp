@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QUuid>
 #include <algorithm>
 
 namespace pettime {
@@ -92,6 +93,34 @@ bool SettingsStore::saveLimit(int value, QString *error) const {
         return false;
     }
     return true;
+}
+QString SettingsStore::networkDeviceId(QString *error) const {
+    QFile existing(QDir(directory_).filePath("network-device-id.dat"));
+    if (existing.exists()) {
+        if (!existing.open(QIODevice::ReadOnly)) {
+            if (error) *error = existing.errorString();
+            return {};
+        }
+        const QByteArray data = existing.read(128).trimmed();
+        const QUuid id(QString::fromUtf8(data));
+        if (existing.size() > 64 || id.isNull() || data != id.toString(QUuid::WithoutBraces).toUtf8()) {
+            if (error) *error = "网络设备 ID 存档损坏，请检查 network-device-id.dat。";
+            return {};
+        }
+        return QString::fromUtf8(data);
+    }
+    if (!QDir().mkpath(directory_)) {
+        if (error) *error = "无法创建网络设备 ID 存档目录。";
+        return {};
+    }
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSaveFile file(existing.fileName());
+    const QByteArray data = id.toUtf8() + "\n";
+    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+        if (error) *error = file.errorString();
+        return {};
+    }
+    return id;
 }
 void SettingsStore::log(const QString &message) const {
     if (!QDir().mkpath(directory_))
