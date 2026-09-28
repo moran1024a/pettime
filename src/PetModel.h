@@ -32,6 +32,9 @@ class PetModel {
     PetModel(std::uint32_t seed, QPointF center, QRectF area, bool juvenile = false);
     void advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors = {});
     bool feed();
+    bool setManualControl(bool enabled);
+    void setManualDirection(QPointF direction);
+    bool manuallyControlled() const { return manualControl_; }
     bool playFeeding();
     QString displayName() const;
     std::uint64_t id = 0;
@@ -69,6 +72,9 @@ class PetModel {
     QPointF mealPosition;
 
   private:
+    bool manualControl_ = false;
+    QPointF manualDirection_;
+    void updateManual(double dt);
     void enter(State next, double duration);
     void chooseBehavior();
     void startFlight(bool frontal, bool manual);

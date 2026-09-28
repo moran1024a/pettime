@@ -162,6 +162,52 @@ void PetModel::retire() {
     }
 }
 
+bool PetModel::setManualControl(bool enabled) {
+    if (enabled && (primary || !active() || expired || splitReady || dispatchPaused))
+        return false;
+    if (manualControl_ == enabled)
+        return true;
+    manualControl_ = enabled;
+    manualDirection_ = {};
+    speed = 0;
+    if (active()) {
+        if (enabled) {
+            enter(State::Rest, 1);
+            targetSpeed_ = 0;
+        } else {
+            enter(State::Probe, 1);
+            nextTurn_ = 0;
+            nextSpecial_ = random(2.3, 4.8);
+        }
+    }
+    return true;
+}
+void PetModel::setManualDirection(QPointF direction) {
+    if (!manualControl_)
+        return;
+    if (!std::isfinite(direction.x()) || !std::isfinite(direction.y()))
+        direction = {};
+    const double magnitude = length(direction);
+    manualDirection_ = magnitude > 0 ? direction / magnitude : QPointF{};
+    if (magnitude == 0)
+        speed = 0;
+}
+void PetModel::updateManual(double dt) {
+    const bool moving = !manualDirection_.isNull();
+    const State next = moving ? State::Probe : State::Rest;
+    if (state != next)
+        enter(next, 1);
+    speed = moving ? 140 : 0;
+    if (!moving)
+        return;
+    heading = desired_ = angle(manualDirection_);
+    const auto old = position;
+    position = clampPoint(position + manualDirection_ * (speed * std::min(dt, .1)), area, 36);
+    const double distance = length(position - old);
+    traveled += distance;
+    phase = std::fmod(phase + distance / std::max(9.0, 27 * scale), 1);
+}
+
 void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors) {
     impact = false;
     if (!std::isfinite(dt) || dt <= 0 || expired || splitReady)
@@ -200,6 +246,10 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
     }
     if (state == State::Fade) {
         expired = actionAge >= actionDuration;
+        return;
+    }
+    if (!primary && manualControl_) {
+        updateManual(dt);
         return;
     }
     cooldown_ -= dt;

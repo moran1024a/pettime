@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QKeyEvent>
 #include <QRandomGenerator>
 #include <QSaveFile>
 #include <QScreen>
@@ -48,6 +49,8 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     if (!limitWarning.isEmpty())
         startupWarning_ += "\n" + limitWarning;
     swarm_.beforeRemove = [this](std::uint64_t id) {
+        if (controlledPet_ == id)
+            stopControl();
         if (dispatch_)
             dispatch_->removeEntity(id);
         windows_.erase(id);
@@ -62,6 +65,7 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
         return screen ? QRectF(screen->availableGeometry()) : QRectF{};
     });
     connect(dispatch_.get(), &DispatchController::changed, this, [this] {
+        validateControl();
         // Defer reconciliation: a removal callback may still be traversing the swarm.
         QTimer::singleShot(0, this, [this] {
             reconcileWindows();
@@ -83,6 +87,7 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
                 if (it != visitorWindows_.end())
                     it->second->highlight();
             });
+    qApp->installEventFilter(this);
     makeMenu();
     connect(&mainWindow_, &PetWindow::contextRequested, this, [this](QPoint point) {
         contextPet_ = 1;
@@ -107,6 +112,8 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     connect(qApp, &QGuiApplication::screenRemoved, this, [this] { updateScreens(); });
 }
 ApplicationController::~ApplicationController() {
+    qApp->removeEventFilter(this);
+    stopControl();
     timer_.stop();
     dispatch_->shutdown();
     network_->stop();
@@ -227,6 +234,72 @@ void ApplicationController::changeLimit() {
     if (!store_.saveLimit(value, &error))
         warn("数量上限已在本次运行生效，但未能保存。请通过数量上限菜单重试。\n" + error);
 }
+bool ApplicationController::canStartControl(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    return p && !p->primary && p->active() && !p->expired && !p->splitReady &&
+           !p->dispatchPaused && dispatch_->canControl(id);
+}
+void ApplicationController::clearControlKeys() {
+    controlKeys_.clear();
+    if (auto *p = swarm_.find(controlledPet_))
+        p->setManualDirection({});
+}
+void ApplicationController::stopControl() {
+    clearControlKeys();
+    if (auto *p = swarm_.find(controlledPet_))
+        p->setManualControl(false);
+    controlledPet_ = 0;
+    controlledGroup_.clear();
+}
+void ApplicationController::validateControl() {
+    if (!controlledPet_)
+        return;
+    const auto *p = swarm_.find(controlledPet_);
+    if (selectedPet() != controlledPet_ || !canStartControl(controlledPet_) ||
+        p->motionGroup != controlledGroup_)
+        stopControl();
+}
+bool ApplicationController::eventFilter(QObject *object, QEvent *event) {
+    if (!petDialog_ || !controlledPet_)
+        return QObject::eventFilter(object, event);
+    if (object == petDialog_.get()) {
+        if (event->type() == QEvent::Hide || event->type() == QEvent::Close) {
+            stopControl();
+            return false;
+        }
+        if (event->type() == QEvent::WindowDeactivate)
+            clearControlKeys();
+    }
+    // Modal editors and other windows must retain their normal keyboard behavior.
+    const auto *widget = qobject_cast<QWidget *>(object);
+    if (!widget || widget->window() != petDialog_.get() || !petDialog_->isActiveWindow() ||
+        (QApplication::activeModalWidget() && QApplication::activeModalWidget() != petDialog_.get()))
+        return false;
+    if (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease &&
+        event->type() != QEvent::ShortcutOverride)
+        return false;
+    auto *key = static_cast<QKeyEvent *>(event);
+    const int k = key->key();
+    if (k != Qt::Key_W && k != Qt::Key_A && k != Qt::Key_S && k != Qt::Key_D &&
+        k != Qt::Key_Up && k != Qt::Key_Left && k != Qt::Key_Down && k != Qt::Key_Right)
+        return false;
+    key->accept();
+    if (event->type() == QEvent::ShortcutOverride || key->isAutoRepeat())
+        return true;
+    validateControl();
+    if (!controlledPet_)
+        return true;
+    if (event->type() == QEvent::KeyPress)
+        controlKeys_.insert(k);
+    else
+        controlKeys_.remove(k);
+    const auto down = [this](int a, int b) { return controlKeys_.contains(a) || controlKeys_.contains(b); };
+    const QPointF direction(int(down(Qt::Key_D, Qt::Key_Right)) - int(down(Qt::Key_A, Qt::Key_Left)),
+                            int(down(Qt::Key_S, Qt::Key_Down)) - int(down(Qt::Key_W, Qt::Key_Up)));
+    swarm_.find(controlledPet_)->setManualDirection(direction);
+    return true;
+}
+
 void ApplicationController::showPets() {
     if (!petDialog_) {
         petDialog_ = std::make_unique<QDialog>();
@@ -245,6 +318,26 @@ void ApplicationController::showPets() {
         petTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         petTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
         layout->addWidget(petTable_);
+        controlPet_ = new QPushButton("开始控制");
+        controlStatus_ = new QLabel("单选自己的非主实体后开始控制；WASD／方向键移动。");
+        controlStatus_->setTextFormat(Qt::PlainText);
+        layout->addWidget(controlPet_);
+        layout->addWidget(controlStatus_);
+        connect(controlPet_, &QPushButton::clicked, this, [this] {
+            if (controlledPet_) {
+                stopControl();
+            } else {
+                const auto id = selectedPet();
+                if (canStartControl(id)) {
+                    auto *p = swarm_.find(id);
+                    if (p->setManualControl(true)) {
+                        controlledPet_ = id;
+                        controlledGroup_ = p->motionGroup;
+                    }
+                }
+            }
+            refreshPets();
+        });
         auto *buttons = new QHBoxLayout;
         renamePet_ = new QPushButton("重命名");
         highlightPet_ = new QPushButton("高亮定位");
@@ -277,6 +370,7 @@ void ApplicationController::showPets() {
             auto *p = swarm_.find(id);
             if (!p || p->primary)
                 return;
+            clearControlKeys();
             bool ok = false;
             const QString name = QInputDialog::getText(petDialog_.get(), "重命名",
                                                        "名称（最多 64 字符，留空恢复编号名称）",
@@ -398,8 +492,14 @@ void ApplicationController::refreshPets() {
                         : "只读访客"},
             0, "visitor:" + key);
     }
+    validateControl();
     const auto id = selectedPet();
     const auto *p = swarm_.find(id);
+    controlPet_->setEnabled(controlledPet_ || canStartControl(id));
+    controlPet_->setText(controlledPet_ ? "停止控制" : "开始控制");
+    controlStatus_->setText(controlledPet_
+        ? QString("正在控制：%1 · WASD／方向键移动，松开停止").arg(p->displayName())
+        : QStringLiteral("单选自己的非主实体后开始控制；WASD／方向键移动。"));
     renamePet_->setEnabled(p && !p->primary);
     highlightPet_->setEnabled(p && dispatch_->canControl(id));
     feedPet_->setEnabled(p && dispatch_->canControl(id) && p->active() && !p->mealActive &&
@@ -529,6 +629,7 @@ void ApplicationController::tick() {
     last_ = now;
     const double dt = elapsed;
     dispatch_->tick();
+    validateControl();
     if (now >= nextVisitors_) {
         reconcileVisitors();
         const int visibleCount = int(dispatch_->visitors().size()) + swarm_.totalCount() -

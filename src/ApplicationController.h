@@ -14,6 +14,7 @@
 #include <QSystemTrayIcon>
 #include <QTableWidget>
 #include <QTimer>
+#include <QSet>
 #include <map>
 
 namespace pettime {
@@ -35,6 +36,11 @@ class ApplicationController : public QObject {
 
   private:
     friend class DispatchTest;
+    bool eventFilter(QObject *object, QEvent *event) override;
+    void stopControl();
+    void clearControlKeys();
+    void validateControl();
+    bool canStartControl(quint64 id) const;
     void tick();
     void makeMenu();
     void showPets();
@@ -68,6 +74,11 @@ class ApplicationController : public QObject {
     QLabel *petCount_ = nullptr, *dispatchStatus_ = nullptr;
     QPushButton *renamePet_ = nullptr, *highlightPet_ = nullptr, *feedPet_ = nullptr;
     QPushButton *dispatchPet_ = nullptr, *recallPet_ = nullptr, *recallAllPets_ = nullptr;
+    QPushButton *controlPet_ = nullptr;
+    QLabel *controlStatus_ = nullptr;
+    quint64 controlledPet_ = 0;
+    QString controlledGroup_;
+    QSet<int> controlKeys_;
     std::uint64_t contextPet_ = 1;
     QMenu menu_;
     QSystemTrayIcon tray_;

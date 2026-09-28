@@ -1,4 +1,5 @@
 #include "NetworkPanel.h"
+#include "DispatchController.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QNetworkDatagram>
@@ -79,6 +80,45 @@ class NetworkTest : public QObject {
     Q_OBJECT
   private slots:
     void initTestCase() { QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy); }
+    void manualMovementOverRealConnection() {
+        Pair pair;
+        SwarmController source(1, {400, 400}, {0, 0, 1280, 720});
+        SwarmController target(2, {400, 400}, {0, 0, 1280, 720});
+        source.spawn({400, 400}, {0, 0, 1280, 720}, 1, 1);
+        DispatchController owner(*pair.a, source, [] { return QRectF(0, 0, 1280, 720); });
+        DispatchController guest(*pair.b, target, [] { return QRectF(0, 0, 1280, 720); });
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, this, [&] {
+            owner.tick();
+            guest.tick();
+            source.advance(.02);
+        });
+        timer.start(20);
+        QVERIFY(pair.start());
+        QTRY_VERIFY(pair.connected());
+        owner.dispatchPets({2}, pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::Active);
+        const QString id = owner.outgoing()[2].id;
+        QTRY_VERIFY(guest.visitors().contains(id) && guest.visitors()[id].sequence > 0);
+        auto *p = source.find(2);
+        QVERIFY(p->setManualControl(true));
+        p->moveTo({400, 400}, p->area);
+        p->setManualDirection({1, 0});
+        QTRY_VERIFY(guest.visitors()[id].current.position.x() > 420);
+        p->setManualDirection({});
+        const auto stop = p->position;
+        QTRY_VERIFY(QLineF(guest.visitors()[id].current.position, stop).length() < .01);
+        QSignalSpy highlights(&guest, &DispatchController::visitorHighlight);
+        QVERIFY(owner.highlightPet(2));
+        QTRY_COMPARE(highlights.count(), 1);
+        QVERIFY(p->playFeeding());
+        QTRY_COMPARE(guest.visitors()[id].current.state, State::Food);
+        QCOMPARE(target.totalCount(), 1);
+        owner.recallPet(2);
+        QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());
+        QVERIFY(!owner.isAway(2));
+    }
     void identityPersistenceAndErrors() {
         QTemporaryDir dir;
         SettingsStore store(dir.path());
