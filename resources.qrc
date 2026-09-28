@@ -1,0 +1,11 @@
+<RCC><qresource prefix="/assets">
+  <file alias="body-clean.png">assets/body-clean.png</file>
+  <file alias="nymph-body.png">assets/nymph-body.png</file>
+  <file alias="pounce-atlas.png">assets/pounce-atlas.png</file>
+  <file alias="crush-atlas.png">assets/crush-atlas.png</file>
+  <file alias="front-pounce-base.png">assets/front-pounce-base.png</file>
+  <file alias="front-pounce-upstroke.png">assets/front-pounce-upstroke.png</file>
+  <file alias="front-pounce-downstroke.png">assets/front-pounce-downstroke.png</file>
+  <file alias="front-pounce-crouch.png">assets/front-pounce-crouch.png</file>
+  <file alias="front-pounce-transition.png">assets/front-pounce-transition.png</file>
+</qresource></RCC>

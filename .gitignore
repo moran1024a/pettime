@@ -9,3 +9,9 @@ obj/
 # Local runtime and generated previews
 runtime.log
 preview/
+
+# CMake and Qt builds
+build/
+build-*/
+CMakeUserPresets.json
+*.user
