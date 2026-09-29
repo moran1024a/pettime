@@ -15,6 +15,20 @@ PetModel *SwarmController::find(std::uint64_t id) const {
             return p.get();
     return nullptr;
 }
+bool SwarmController::removeLocalPet(std::uint64_t id) {
+    for (auto it = pets_.begin() + 1; it != pets_.end(); ++it) {
+        const auto &p = *it;
+        if (p->id != id)
+            continue;
+        if (p->primary || !p->motionGroup.isEmpty() || p->dispatchPaused)
+            return false;
+        if (beforeRemove)
+            beforeRemove(id);
+        pets_.erase(it);
+        return true;
+    }
+    return false;
+}
 bool SwarmController::rename(std::uint64_t id, const QString &name) {
     auto *p = find(id);
     if (!p || p->primary)

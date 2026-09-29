@@ -4,6 +4,7 @@
 #include <QTemporaryDir>
 #include <QScreen>
 #include <QScrollBar>
+#include <QPointer>
 #include <QUuid>
 #include <QtTest>
 
@@ -56,6 +57,126 @@ class DispatchTest : public QObject {
         return v;
     }
   private slots:
+    void clearLocalPetNeverSplitsOrReusesId() {
+        Fixture f;
+        auto *p = f.swarm.find(2);
+        p->crush();
+        p->advance(1.1, {});
+        QVERIFY(p->splitReady);
+        int removals = 0;
+        f.swarm.beforeRemove = [&](quint64 id) {
+            QCOMPARE(id, quint64(2));
+            QVERIFY(f.swarm.find(id)); // Cleanup precedes destruction.
+            ++removals;
+        };
+        QVERIFY(!f.swarm.removeLocalPet(1));
+        QVERIFY(!f.swarm.removeLocalPet(0));
+        QVERIFY(f.swarm.removeLocalPet(2));
+        QVERIFY(!f.swarm.removeLocalPet(2));
+        QCOMPARE(removals, 1);
+        f.swarm.advance(2);
+        QCOMPARE(f.swarm.totalCount(), 2);
+        QCOMPARE(f.swarm.pendingCount(), std::size_t(0));
+        f.swarm.spawn({500, 500}, {0, 0, 1280, 720}, 1, 1);
+        QVERIFY(f.swarm.find(4));
+        QVERIFY(!f.swarm.find(2));
+    }
+    void clearRejectsPrimaryVisitorsAndEveryDispatchPhase() {
+        QTemporaryDir dir;
+        AnimationLibrary animation;
+        RunOptions options;
+        options.population = 2;
+        ApplicationController app(animation, SettingsStore(dir.path()), options);
+        app.start();
+        app.timer_.stop();
+        app.showPets();
+        QVERIFY(!app.clearPet_->isEnabled());
+        QVERIFY(!app.clearPet(1));
+        app.petTable_->selectRow(1);
+        QVERIFY(app.clearPet_->isEnabled());
+        DispatchController::Outgoing o;
+        o.entity = 2;
+        o.id = uuid();
+        for (auto phase : {DispatchController::Phase::Offering,
+                           DispatchController::Phase::Activating,
+                           DispatchController::Phase::Active,
+                           DispatchController::Phase::Frozen,
+                           DispatchController::Phase::Recalling}) {
+            o.phase = phase;
+            app.dispatch_->outgoing_.insert(2, o);
+            // Recheck at action time, even before the enabled button refreshes.
+            app.clearPet_->click();
+            QVERIFY(app.swarm_.find(2));
+            QVERIFY(!app.clearPet(2));
+            app.refreshPets();
+            QVERIFY(!app.clearPet_->isEnabled());
+        }
+        app.dispatch_->outgoing_.clear();
+        DispatchController::Visitor v;
+        v.id = uuid();
+        v.entity = "2";
+        v.active = true;
+        app.dispatch_->visitors_.insert(v.id, v);
+        app.refreshPets();
+        app.petTable_->selectRow(2);
+        QVERIFY(!app.clearPet_->isEnabled());
+        QVERIFY(!app.clearPet(app.selectedPet()));
+        QVERIFY(app.swarm_.find(2));
+        QVERIFY(app.dispatch_->visitors_.contains(v.id));
+        app.petTable_->selectRow(1);
+        app.petTable_->selectionModel()->select(app.petTable_->model()->index(2, 0),
+            QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        app.refreshPets();
+        QVERIFY(!app.clearPet_->isEnabled());
+        app.petTable_->clearSelection();
+        QVERIFY(!app.clearPet_->isEnabled());
+    }
+    void clearStopsControlFeedingAndHighlightWithoutScrolling() {
+        QTemporaryDir dir;
+        AnimationLibrary animation;
+        RunOptions options;
+        options.population = 30;
+        ApplicationController app(animation, SettingsStore(dir.path()), options);
+        app.start();
+        app.timer_.stop();
+        app.showPets();
+        app.petTable_->selectRow(1);
+        auto *p = app.swarm_.find(2);
+        p->customName = "clear-test-highlight";
+        app.controlPet_->click();
+        app.feedPet_->click();
+        app.highlightPet_->click();
+        QVERIFY(p->manuallyControlled());
+        QVERIFY(p->cosmeticFeeding);
+        QPointer<PetWindow> window = app.windows_.at(2).get();
+        QPointer<QLabel> highlight;
+        for (auto *w : QApplication::topLevelWidgets())
+            if (auto *label = qobject_cast<QLabel *>(w))
+                if (label->text() == p->customName)
+                    highlight = label;
+        QVERIFY(highlight);
+        QTest::qWait(30);
+        auto *scroll = app.petTable_->verticalScrollBar();
+        QVERIFY(scroll->maximum() > 0);
+        scroll->setValue(scroll->maximum() / 2);
+        const int before = scroll->value();
+        app.clearPet_->click();
+        QVERIFY(!app.swarm_.find(2));
+        QVERIFY(window.isNull());
+        QVERIFY(highlight.isNull());
+        QCOMPARE(app.controlledPet_, quint64(0));
+        QVERIFY(app.controlKeys_.isEmpty());
+        QCOMPARE(app.swarm_.totalCount(), 29);
+        QCOMPARE(app.petTable_->rowCount(), 29);
+        QCOMPARE(app.swarm_.limit(), 72);
+        QVERIFY(app.petTable_->selectionModel()->selectedRows().isEmpty());
+        QVERIFY(!app.clearPet_->isEnabled());
+        QVERIFY(!app.clearPet(2));
+        QTest::qWait(30);
+        QCOMPARE(scroll->value(), before);
+        QCOMPARE(app.swarm_.pendingCount(), std::size_t(0));
+        QCOMPARE(app.primary_.id, quint64(1));
+    }
     void feedingTargetsSelectedRowRatherThanCurrentRow() {
         QTemporaryDir dir;
         AnimationLibrary animation;

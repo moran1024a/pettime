@@ -316,6 +316,18 @@ bool ApplicationController::eventFilter(QObject *object, QEvent *event) {
     return true;
 }
 
+bool ApplicationController::canClearPet(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    return p && !p->primary && p->motionGroup.isEmpty() && !p->dispatchPaused &&
+           !dispatch_->outgoing().contains(id);
+}
+bool ApplicationController::clearPet(quint64 id) {
+    if (!canClearPet(id) || !swarm_.removeLocalPet(id))
+        return false;
+    refreshPets();
+    return true;
+}
+
 void ApplicationController::selectPets(bool visitors) {
     if (!petTable_)
         return;
@@ -390,7 +402,12 @@ void ApplicationController::showPets() {
         renamePet_ = new QPushButton("重命名");
         highlightPet_ = new QPushButton("高亮定位");
         feedPet_ = new QPushButton("投喂");
-        for (auto *button : {renamePet_, highlightPet_, feedPet_})
+        clearPet_ = new QPushButton("清除");
+        clearPet_->setToolTip("立即清除仍在本机的自有非主实体，不触发分裂。");
+        connect(clearPet_, &QPushButton::clicked, this, [this] {
+            clearPet(selectedPet());
+        });
+        for (auto *button : {renamePet_, highlightPet_, feedPet_, clearPet_})
             buttons->addWidget(button);
         layout->addLayout(buttons);
         auto *dispatchButtons = new QHBoxLayout;
@@ -559,6 +576,7 @@ void ApplicationController::refreshPets() {
     controlStatus_->setText(controlledPet_
         ? QString("正在控制：%1 · WASD／方向键移动，松开停止").arg(p->displayName())
         : QStringLiteral("单选自己的非主实体后开始控制；WASD／方向键移动。"));
+    clearPet_->setEnabled(canClearPet(id));
     expelPet_->setEnabled(dispatch_->visitors().contains(selectedVisitor()));
     renamePet_->setEnabled(p && !p->primary);
     highlightPet_->setEnabled(p && dispatch_->canControl(id));

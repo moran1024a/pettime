@@ -12,6 +12,7 @@ class SwarmController {
                              QRectF area = {0, 0, 1000, 1000});
     PetModel &primary() const { return *pets_.front(); }
     PetModel *find(std::uint64_t id) const;
+    bool removeLocalPet(std::uint64_t id);
     bool rename(std::uint64_t id, const QString &name);
     void setLimit(int limit);
     int limit() const { return limit_; }

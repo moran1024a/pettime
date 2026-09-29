@@ -1,5 +1,14 @@
 # 重构验证记录
 
+## 0.3.2 本机子体清除（2026-09-29）
+
+- `cmake --build build -j4` 成功；版本输出 `Pettime 0.3.2`，协议保持 3，源码指纹自动更新。
+- 四组 CTest 全部通过，总耗时 12.69 秒。新增测试覆盖主实体／访客／多选／无选择拒绝清除，派遣 Offering、Activating、Active、Frozen、Recalling 全阶段拒绝，以及按钮未及时刷新时的执行校验。
+- 验证清除已经 splitReady 的普通实体也不会触发分裂，删除前回调执行一次，重复删除安全、编号不复用；既有数量上限及网络回归通过。
+- 验证手动控制、投喂、高亮中的实体清除后，模型、实体窗口和高亮窗口均释放；控制编号和按键状态清空，数量／列表立即更新，失效选择清空，滚动位置保持，数量上限不改变。
+- 本机 X11 执行 `clearStopsControlFeedingAndHighlightWithoutScrolling` 和 `clearRejectsPrimaryVisitorsAndEveryDispatchPhase`，含初始化／清理共 4 PASS，1.367 秒。
+- 未访问远端测试机，未做 Windows 实际构建或运行；未提交或推送。
+
 ## 0.3.1 成长、定向投喂与分裂归零（2026-09-29）
 
 - `cmake --build build -j4` 成功；`pettime --version` 输出 `Pettime 0.3.1`。协议升级至 3，源码指纹自动更新。

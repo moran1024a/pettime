@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Pettime VERSION 0.3.1 LANGUAGES CXX)
+project(Pettime VERSION 0.3.2 LANGUAGES CXX)
 
 include(cmake/SourceFingerprint.cmake)
 pettime_source_fingerprint("${CMAKE_CURRENT_SOURCE_DIR}" PETTIME_SOURCE_FINGERPRINT)

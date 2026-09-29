@@ -45,6 +45,8 @@ class ApplicationController : public QObject {
     void makeMenu();
     void showPets();
     void selectPets(bool visitors);
+    bool canClearPet(quint64 id) const;
+    bool clearPet(quint64 id);
     void showNetwork();
     void refreshPets();
     void dispatchSelected();
@@ -75,6 +77,7 @@ class ApplicationController : public QObject {
     QLabel *petCount_ = nullptr, *dispatchStatus_ = nullptr;
     QPushButton *renamePet_ = nullptr, *highlightPet_ = nullptr, *feedPet_ = nullptr;
     QPushButton *dispatchPet_ = nullptr, *recallPet_ = nullptr, *recallAllPets_ = nullptr;
+    QPushButton *clearPet_ = nullptr;
     QPushButton *expelPet_ = nullptr;
     QString selectedVisitor() const;
     QPushButton *controlPet_ = nullptr;
