@@ -15,3 +15,12 @@ build/
 build-*/
 CMakeUserPresets.json
 *.user
+
+# Portable settings and progress
+config.json
+progress.json
+config.json.invalid*
+progress.json.invalid*
+network-device-id.dat
+runtime.log.1
+pettime-*.lock

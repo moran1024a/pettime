@@ -4,6 +4,8 @@
 #include "SettingsStore.h"
 #include "SwarmController.h"
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QInputDialog>
 #include <QProcess>
 #include <QSysInfo>
@@ -439,6 +441,87 @@ class TestPettime : public QObject {
             QVERIFY(bounds.left() > 0 && bounds.top() > 0 && bounds.right() < 223 &&
                     bounds.bottom() < 223);
         }
+    }
+    void portableProgressRoundTripAndTransfer() {
+        QCOMPARE(SettingsStore().directory(), QCoreApplication::applicationDirPath());
+        QTemporaryDir source, destination;
+        SettingsStore store(source.path());
+        SwarmController swarm(5);
+        swarm.setLimit(12);
+        swarm.spawn({500, 500}, {0, 0, 1000, 1000}, 3, 3);
+        QVERIFY(swarm.removeLocalPet(4));
+        swarm.primary().becomeNymph();
+        swarm.primary().affection = 67;
+        auto *child = swarm.find(2);
+        child->advance(180, {-10000, -10000});
+        child->customName = "可转移的小强";
+        child->affection = 12;
+        child->motionGroup = "another-device";
+        child->dispatchPaused = true;
+        auto progress = swarm.saveProgress();
+        QVERIFY(store.saveJson("progress.json", progress));
+        QVERIFY(store.saveJson("config.json", {{"populationLimit", 12}}));
+        QVERIFY(QFile::copy(source.filePath("progress.json"), destination.filePath("progress.json")));
+        SettingsStore transferred(destination.path());
+        SwarmController restored(7, {200, 200}, {0, 0, 400, 400});
+        auto *primaryAddress = &restored.primary();
+        restored.restoreProgress(transferred.loadJson("progress.json"));
+        QCOMPARE(&restored.primary(), primaryAddress);
+        QCOMPARE(restored.totalCount(), 3);
+        QCOMPARE(restored.primary().id, quint64(1));
+        QCOMPARE(restored.primary().displayName(), QSysInfo::machineHostName());
+        QCOMPARE(restored.primary().affection, 67);
+        QCOMPARE(restored.primary().growth(), 0.0);
+        QCOMPARE(restored.find(2)->customName, child->customName);
+        QCOMPARE(restored.find(2)->growth(), child->growth());
+        QCOMPARE(restored.find(2)->generation, 3);
+        QCOMPARE(restored.find(2)->age, child->age);
+        QCOMPARE(restored.find(2)->affection, 12);
+        QVERIFY(restored.find(2)->motionGroup.isEmpty());
+        QVERIFY(!restored.find(2)->dispatchPaused);
+        QVERIFY(restored.find(2)->area.contains(restored.find(2)->position));
+        restored.spawn({200, 200}, {0, 0, 400, 400}, 1, 1);
+        QVERIFY(restored.find(5)); // Deleted IDs remain consumed after restart.
+        QVERIFY(!restored.find(4));
+        QCOMPARE(store.loadAffinity(), 67);
+        QCOMPARE(store.loadLimit(), 12);
+    }
+    void portableMalformedDataAndBackup() {
+        QTemporaryDir dir;
+        SettingsStore store(dir.path());
+        QFile bad(dir.filePath("progress.json"));
+        QVERIFY(bad.open(QIODevice::WriteOnly));
+        bad.write("not json");
+        bad.close();
+        QString warning;
+        QVERIFY(store.loadJson("progress.json", &warning).isEmpty());
+        QVERIFY(!warning.isEmpty());
+        QVERIFY(store.saveJson("progress.json", {{"count", 1}}));
+        QFile backup(dir.filePath("progress.json.invalid"));
+        QVERIFY(backup.open(QIODevice::ReadOnly));
+        QCOMPARE(backup.readAll(), QByteArray("not json"));
+        QCOMPARE(store.loadJson("progress.json").value("count").toInt(), 1);
+        QFile blocker(dir.filePath("blocker"));
+        QVERIFY(blocker.open(QIODevice::WriteOnly));
+        blocker.write("keep");
+        blocker.close();
+        QVERIFY(!SettingsStore(blocker.fileName() + "/child").saveJson("config.json", {}, &warning));
+        QVERIFY(!warning.isEmpty());
+        SwarmController restored;
+        restored.setLimit(2);
+        QJsonArray pets{QJsonObject{{"id", "2"}, {"growth", 200}, {"affection", -8}},
+                        QJsonObject{{"id", "2"}}, QJsonObject{{"id", "0"}},
+                        QJsonObject{{"id", "3"}}, QJsonObject{{"id", "1"}, {"growth", 25}}};
+        restored.restoreProgress({{"pets", pets}});
+        QCOMPARE(restored.totalCount(), 2);
+        QCOMPARE(restored.primary().growth(), 25.0);
+        QVERIFY(restored.primary().juvenile);
+        QCOMPARE(restored.find(2)->growth(), 100.0);
+        QVERIFY(!restored.find(2)->juvenile);
+        QCOMPARE(restored.find(2)->affection, 0);
+        restored.restoreProgress({{"pets", QJsonArray{}}});
+        QCOMPARE(restored.totalCount(), 1);
+        QVERIFY(restored.primary().primary);
     }
     void storageFailureAndRecovery() {
         QTemporaryDir dir;

@@ -57,6 +57,62 @@ class DispatchTest : public QObject {
         return v;
     }
   private slots:
+    void portableApplicationMigrationAutosaveAndRestart() {
+        QTemporaryDir dir;
+        SettingsStore store(dir.path());
+        QVERIFY(store.saveAffinity(41));
+        QVERIFY(store.saveLimit(9));
+        AnimationLibrary animation;
+        double savedGrowth = 0;
+        {
+            ApplicationController app(animation, store, RunOptions{});
+            QCOMPARE(app.primary_.affection, 41);
+            QCOMPARE(app.swarm_.limit(), 9);
+            app.start();
+            app.timer_.stop();
+            QVERIFY(store.hasFile("config.json"));
+            QVERIFY(store.hasFile("progress.json"));
+            app.swarm_.spawn({300, 300}, app.primary_.area, 2, 2);
+            auto *p = app.swarm_.find(2);
+            p->customName = "保存测试";
+            p->advance(120, {-10000, -10000});
+            savedGrowth = p->growth();
+            p->motionGroup = "remote";
+            p->dispatchPaused = true;
+            QVERIFY(app.swarm_.removeLocalPet(3));
+            app.primary_.paused = true;
+            app.primary_.pace = .65;
+            app.primary_.scale = 1;
+            app.nextSave_ = 0;
+            app.tick();
+            QCOMPARE(store.loadJson("progress.json").value("count").toInt(), 2);
+            QCOMPARE(store.loadJson("config.json").value("pace").toDouble(), .65);
+            // The destructor must save even when affection did not change.
+            p->customName = "退出时保存";
+        }
+        {
+            ApplicationController restored(animation, store, RunOptions{});
+            QCOMPARE(restored.swarm_.totalCount(), 2);
+            QCOMPARE(restored.swarm_.limit(), 9);
+            QCOMPARE(restored.primary_.affection, 41);
+            QCOMPARE(restored.primary_.scale, 1.0);
+            QCOMPARE(restored.primary_.pace, .65);
+            QVERIFY(restored.primary_.paused);
+            auto *p = restored.swarm_.find(2);
+            QVERIFY(p);
+            QCOMPARE(p->customName, QString("退出时保存"));
+            QCOMPARE(p->growth(), savedGrowth);
+            QVERIFY(p->motionGroup.isEmpty());
+            QVERIFY(!p->dispatchPaused);
+            QVERIFY(restored.dispatch_->visitors().isEmpty());
+            QVERIFY(restored.dispatch_->outgoing().isEmpty());
+            QVERIFY(!restored.network_->running());
+        }
+        QFile old(dir.filePath("affinity.dat"));
+        QVERIFY(old.open(QIODevice::ReadOnly));
+        QCOMPARE(old.readAll(), QByteArray("41\n"));
+    }
+
     void clearLocalPetNeverSplitsOrReusesId() {
         Fixture f;
         auto *p = f.swarm.find(2);

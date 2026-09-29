@@ -93,6 +93,8 @@ class ApplicationController : public QObject {
     QTimer timer_;
     QElapsedTimer clock_;
     double last_ = 0, lastSwarm_ = 0, nextSwarm_ = 0, nextVisitors_ = 0, retryAt_ = 0;
+    double nextSave_ = 5;
+    bool restoreNetwork_ = false;
     double totalTickMs_ = 0, maxTickMs_ = 0;
     int ticks_ = 0, swarmUpdates_ = 0, recalls_ = 0, impacts_ = 0;
     bool dirty_ = false, saveWarning_ = false, smokePounce_ = false;

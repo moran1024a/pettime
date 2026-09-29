@@ -1,5 +1,9 @@
 #include "SettingsStore.h"
 #include <QDateTime>
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonParseError>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,19 +14,73 @@
 
 namespace pettime {
 SettingsStore::SettingsStore(QString directory)
-    : directory_(directory.isEmpty()
-                     ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-                     : std::move(directory)) {}
+    : directory_(directory.isEmpty() ? QCoreApplication::applicationDirPath() : directory),
+      portableDefault_(directory.isEmpty()) {}
+QString SettingsStore::legacyDirectory() const {
+    return portableDefault_
+        ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) : directory_;
+}
+bool SettingsStore::hasFile(const QString &name) const {
+    return QFileInfo::exists(QDir(directory_).filePath(name));
+}
+QJsonObject SettingsStore::loadJson(const QString &name, QString *warning) const {
+    QFile file(QDir(directory_).filePath(name));
+    if (!file.exists())
+        return {};
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (warning) *warning = file.fileName() + ": " + file.errorString();
+        return {};
+    }
+    QJsonParseError parse;
+    const auto document = QJsonDocument::fromJson(file.read(2 * 1024 * 1024 + 1), &parse);
+    if (file.size() > 2 * 1024 * 1024 || parse.error != QJsonParseError::NoError || !document.isObject()) {
+        if (warning) *warning = file.fileName() + " 格式无效，已使用默认值；原文件会保留为 .invalid 备份。";
+        return {};
+    }
+    return document.object();
+}
+bool SettingsStore::saveJson(const QString &name, const QJsonObject &object, QString *error) const {
+    if (!QDir().mkpath(directory_)) {
+        if (error) *error = "无法创建存档目录：" + directory_;
+        return false;
+    }
+    const QString path = QDir(directory_).filePath(name);
+    QString warning;
+    loadJson(name, &warning);
+    if (!warning.isEmpty()) {
+        QString backup = path + ".invalid";
+        for (int i = 1; QFileInfo::exists(backup); ++i)
+            backup = path + ".invalid." + QString::number(i);
+        if (!QFile::copy(path, backup)) {
+            if (error) *error = "无法备份损坏存档，未覆盖原文件：" + path;
+            return false;
+        }
+    }
+    QSaveFile file(path);
+    const auto data = QJsonDocument(object).toJson(QJsonDocument::Indented);
+    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+        if (error) *error = path + ": " + file.errorString();
+        return false;
+    }
+    return true;
+}
 int SettingsStore::loadAffinity(QString *warning) const {
+    if (hasFile("progress.json")) {
+        const auto pets = loadJson("progress.json", warning).value("pets").toArray();
+        for (const auto &value : pets) {
+            const auto p = value.toObject();
+            if (p.value("id").toString() == "1")
+                return std::clamp(p.value("affection").toInt(), 0, 100);
+        }
+        return 0;
+    }
     QString path = QDir(directory_).filePath("affinity.dat");
-    bool migrate = false;
 #ifdef Q_OS_WIN
     if (!QFileInfo::exists(path)) {
         const QString legacy =
             QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath("XiaoqiangPet/affinity.dat");
         if (QFileInfo::exists(legacy)) {
             path = legacy;
-            migrate = true;
         }
     }
 #endif
@@ -42,8 +100,6 @@ int SettingsStore::loadAffinity(QString *warning) const {
         return 0;
     }
     const int bounded = std::clamp(value, 0, 100);
-    if (migrate)
-        saveAffinity(bounded, warning);
     return bounded;
 }
 bool SettingsStore::saveAffinity(int value, QString *error) const {
@@ -62,6 +118,8 @@ bool SettingsStore::saveAffinity(int value, QString *error) const {
     return true;
 }
 int SettingsStore::loadLimit(QString *warning) const {
+    if (hasFile("config.json"))
+        return std::clamp(loadJson("config.json", warning).value("populationLimit").toInt(72), 1, 72);
     QFile file(QDir(directory_).filePath("population-limit.dat"));
     if (!file.exists())
         return 72;

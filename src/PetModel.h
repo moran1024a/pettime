@@ -77,6 +77,7 @@ class PetModel {
     QPointF mealPosition;
 
   private:
+    friend class SwarmController;
     double growth_ = 100;
     void addGrowth(double amount);
     void feedingGrowth();

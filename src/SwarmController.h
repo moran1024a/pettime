@@ -1,5 +1,6 @@
 #pragma once
 #include "PetModel.h"
+#include <QJsonObject>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -10,6 +11,8 @@ class SwarmController {
     static constexpr int MaxPets = 72; // Includes the primary pet, even after it becomes a nymph.
     explicit SwarmController(std::uint32_t seed = 1, QPointF center = {500, 500},
                              QRectF area = {0, 0, 1000, 1000});
+    QJsonObject saveProgress() const;
+    void restoreProgress(const QJsonObject &object);
     PetModel &primary() const { return *pets_.front(); }
     PetModel *find(std::uint64_t id) const;
     bool removeLocalPet(std::uint64_t id);

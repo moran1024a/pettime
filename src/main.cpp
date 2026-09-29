@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
     parser.addOption({"output", "导出或测试输出目录。", "directory", "preview"});
     parser.addOption({"smoke-pets", "测试中的总宠物数量，1–72。", "count", "1"});
     parser.addOption({"duration", "烟雾测试秒数，3–120。", "seconds", "6"});
-    parser.addOption({"data-dir", "用户数据目录（默认使用系统用户数据位置）。", "directory"});
+    parser.addOption({"data-dir", "数据目录覆盖（默认使用可执行文件所在目录）。", "directory"});
     parser.process(app);
     const bool smoke = parser.isSet("smoke"), exporting = parser.isSet("export");
     auto fail = [](const QString &message) {

@@ -44,11 +44,31 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
       options_(std::move(options)),
       swarm_(options_.seed, areaAt(QCursor::pos()).center(), areaAt(QCursor::pos())),
       primary_(swarm_.primary()), mainWindow_(primary_, animation_), crack_(options_.seed + 2) {
-    primary_.affection = store_.loadAffinity(&startupWarning_);
-    QString limitWarning;
-    swarm_.setLimit(options_.smoke ? 72 : store_.loadLimit(&limitWarning));
-    if (!limitWarning.isEmpty())
-        startupWarning_ += "\n" + limitWarning;
+    QString warning;
+    const bool hasConfig = store_.hasFile("config.json");
+    const bool hasProgress = store_.hasFile("progress.json");
+    const auto config = options_.smoke ? QJsonObject{} : store_.loadJson("config.json", &warning);
+    startupWarning_ = warning;
+    auto appendWarning = [this](const QString &text) {
+        if (!text.isEmpty()) startupWarning_ += "\n" + text;
+    };
+    const SettingsStore legacy(store_.legacyDirectory());
+    warning.clear();
+    swarm_.setLimit(options_.smoke ? 72 : hasConfig
+        ? config.value("populationLimit").toInt(72) : legacy.loadLimit(&warning));
+    appendWarning(warning);
+    warning.clear();
+    if (!options_.smoke) {
+        if (hasProgress)
+            swarm_.restoreProgress(store_.loadJson("progress.json", &warning));
+        else
+            primary_.affection = legacy.loadAffinity(&warning);
+    }
+    appendWarning(warning);
+    primary_.paused = config.value("paused").toBool(false);
+    const double pace = config.value("pace").toDouble(1.5);
+    primary_.pace = pace == .65 || pace == 1 || pace == 1.5 ? pace : 1.5;
+    restoreNetwork_ = !options_.smoke && config.value("networkEnabled").toBool(false);
     swarm_.beforeRemove = [this](std::uint64_t id) {
         if (controlledPet_ == id)
             stopControl();
@@ -116,11 +136,10 @@ ApplicationController::~ApplicationController() {
     qApp->removeEventFilter(this);
     stopControl();
     timer_.stop();
+    persist();
     dispatch_->shutdown();
     network_->stop();
     tray_.hide();
-    if (dirty_)
-        persist();
 }
 void ApplicationController::showNetwork() {
     if (!networkPanel_)
@@ -171,13 +190,13 @@ void ApplicationController::makeMenu() {
     for (int i = 0; i < 3; ++i) {
         auto *action = speeds->addAction(names[i]);
         action->setCheckable(true);
-        action->setChecked(i == 2);
+        action->setChecked(std::abs(primary_.pace - paces[i]) < 1e-9);
         speedGroup->addAction(action);
         const double value = paces[i];
         connect(action, &QAction::triggered, this, [this, value] { primary_.pace = value; });
     }
     menu_.addAction("回到鼠标所在屏幕中央", this, &ApplicationController::recall);
-    retry_ = menu_.addAction("重试保存好感度", this, &ApplicationController::persist);
+    retry_ = menu_.addAction("重试保存配置与进度", this, &ApplicationController::persist);
     retry_->setVisible(false);
     menu_.addSeparator();
     menu_.addAction("退出桌宠", qApp, &QApplication::quit);
@@ -237,9 +256,7 @@ void ApplicationController::changeLimit() {
     reconcileWindows();
     refreshPets();
     refreshMenu();
-    QString error;
-    if (!store_.saveLimit(value, &error))
-        warn("数量上限已在本次运行生效，但未能保存。请通过数量上限菜单重试。\n" + error);
+    persist();
 }
 QString ApplicationController::selectedVisitor() const {
     if (!petTable_)
@@ -627,6 +644,9 @@ void ApplicationController::start() {
     if (options_.population > 1)
         swarm_.spawn(primary_.position, primary_.area, 1, options_.population - 1);
     reconcileWindows();
+    if (restoreNetwork_ && !network_->start())
+        warn("恢复网络服务失败：" + network_->status());
+    persist();
     clock_.start();
     timer_.start();
     if (!startupWarning_.isEmpty())
@@ -654,14 +674,19 @@ void ApplicationController::warn(const QString &message) {
 }
 void ApplicationController::persist() {
     QString error;
-    if (store_.saveAffinity(primary_.affection, &error)) {
+    const QJsonObject config{{"formatVersion", 1}, {"populationLimit", swarm_.limit()},
+        {"paused", primary_.paused}, {"pace", primary_.pace},
+        {"networkEnabled", network_->running()}};
+    // Each file is replaced atomically; progress contains its own complete entity table.
+    if (store_.saveJson("progress.json", swarm_.saveProgress(), &error) &&
+        store_.saveJson("config.json", config, &error)) {
         dirty_ = saveWarning_ = false;
     } else {
         dirty_ = true;
         retryAt_ = clock_.isValid() ? clock_.elapsed() / 1000.0 + 30 : 30;
         if (!saveWarning_) {
             saveWarning_ = true;
-            warn("好感度未能保存，当前进度仍保留在内存中。可从菜单重试。\n" + error);
+            warn("配置或进度未能保存，请确认程序目录可写。当前进度仍保留在内存中，可从菜单重试。\n" + error);
         }
     }
     refreshMenu();
@@ -733,8 +758,10 @@ void ApplicationController::tick() {
         dirty_ = true;
         persist();
     }
-    if (dirty_ && now >= retryAt_)
+    if ((dirty_ && now >= retryAt_) || (!dirty_ && now >= nextSave_)) {
         persist();
+        nextSave_ = now + 5;
+    }
     if (now >= nextSwarm_) {
         swarm_.advance(now - lastSwarm_);
         lastSwarm_ = now;

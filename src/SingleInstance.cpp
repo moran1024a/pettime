@@ -54,6 +54,10 @@ SingleInstance::Result SingleInstance::start(const QString &directory, const QSt
     lock_ = std::make_unique<QLockFile>(QDir(directory).filePath(name + ".lock"));
     lock_->setStaleLockTime(0);
     if (!lock_->tryLock(0)) {
+        if (lock_->error() != QLockFile::LockFailedError) {
+            *error = "无法写入程序数据目录，请确认目录可写：" + directory;
+            return Result::Error;
+        }
         QLocalSocket socket;
         // The first process may still be setting up its listener immediately after locking.
         for (int attempt = 0; attempt < 10; ++attempt) {

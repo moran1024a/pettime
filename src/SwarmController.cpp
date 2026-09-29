@@ -1,5 +1,8 @@
 #include "SwarmController.h"
 #include <algorithm>
+#include <QJsonArray>
+#include <QSet>
+#include <limits>
 #include <cmath>
 #include <map>
 
@@ -8,6 +11,71 @@ SwarmController::SwarmController(std::uint32_t seed, QPointF center, QRectF area
     auto p = std::make_unique<PetModel>(seed, center, area);
     p->id = 1;
     pets_.push_back(std::move(p));
+}
+QJsonObject SwarmController::saveProgress() const {
+    QJsonArray pets;
+    for (const auto &p : pets_) {
+        if (!p->primary && (p->expired || p->state == State::Fade))
+            continue;
+        pets.append(QJsonObject{{"id", QString::number(p->id)}, {"name", p->customName},
+            {"growth", p->growth()}, {"growthState", PetModel::growthState(p->growth())},
+            {"affection", p->affection}, {"generation", p->generation}, {"age", p->age},
+            {"scale", p->scale}, {"x", p->position.x()}, {"y", p->position.y()},
+            {"heading", p->heading}});
+    }
+    return {{"formatVersion", 1}, {"count", pets.size()},
+            {"nextId", QString::number(nextId_)}, {"pets", pets}};
+}
+void SwarmController::restoreProgress(const QJsonObject &object) {
+    // Startup only: keep the primary object's address because its window already references it.
+    const QRectF localArea = primary().area;
+    pets_.erase(pets_.begin() + 1, pets_.end());
+    pending_.clear();
+    nextId_ = 2;
+    QSet<quint64> seen;
+    const auto number = [](const QJsonObject &o, const char *key, double fallback,
+                           double low, double high) {
+        const double value = o.value(QLatin1String(key)).toDouble(fallback);
+        return std::isfinite(value) ? std::clamp(value, low, high) : fallback;
+    };
+    const auto readId = [](const QJsonValue &v) -> quint64 {
+        bool ok = false;
+        const quint64 id = v.isString() ? v.toString().toULongLong(&ok) : quint64(0);
+        if (ok && id > 0 && id < std::numeric_limits<quint64>::max() - MaxPets)
+            return id;
+        if (v.isDouble() && v.toDouble() >= 1 && v.toDouble() <= 9007199254740991.0 &&
+            std::floor(v.toDouble()) == v.toDouble())
+            return quint64(v.toDouble());
+        return 0;
+    };
+    for (const auto &value : object.value("pets").toArray()) {
+        if (!value.isObject()) continue;
+        const auto data = value.toObject();
+        const auto id = readId(data.value("id"));
+        if (!id || seen.contains(id)) continue;
+        seen.insert(id);
+        if (id != 1 && totalCount() >= limit_) continue;
+        auto restored = std::make_unique<PetModel>(rng_(), localArea.center(), localArea);
+        restored->id = id;
+        restored->primary = id == 1;
+        restored->customName = id == 1 ? QString{} : data.value("name").toString().trimmed().left(64);
+        restored->growth_ = number(data, "growth", id == 1 ? 100 : 0, 0, 100);
+        restored->juvenile = restored->growth_ < 100;
+        restored->scale = restored->juvenile ? PetModel::growthScale(restored->growth_)
+            : number(data, "scale", AdultScale, MinimumScale, 1);
+        restored->affection = int(number(data, "affection", 0, 0, 100));
+        restored->generation = int(number(data, "generation", 0, 0, 1000000));
+        restored->age = number(data, "age", 0, 0, 1e12);
+        restored->heading = number(data, "heading", -Pi / 2, -2 * Pi, 2 * Pi);
+        restored->moveTo({number(data, "x", localArea.center().x(), -1e7, 1e7),
+                          number(data, "y", localArea.center().y(), -1e7, 1e7)}, localArea);
+        if (id == 1)
+            primary() = *restored;
+        else
+            pets_.push_back(std::move(restored));
+        nextId_ = std::max(nextId_, std::uint64_t(id + 1));
+    }
+    nextId_ = std::max(nextId_, std::uint64_t(readId(object.value("nextId"))));
 }
 PetModel *SwarmController::find(std::uint64_t id) const {
     for (const auto &p : pets_)
