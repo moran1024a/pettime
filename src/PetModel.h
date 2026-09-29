@@ -55,7 +55,9 @@ class PetModel {
     void moveTo(QPointF center, QRectF area);
     double random(double low, double high);
     static double chaseChance(int count);
-    static double growthScale(double age);
+    static double growthScale(double growth);
+    static QString growthState(double growth);
+    double growth() const { return growth_; }
     bool frontal() const;
     bool active() const { return state != State::Crush && state != State::Fade; }
     double progress() const;
@@ -75,6 +77,9 @@ class PetModel {
     QPointF mealPosition;
 
   private:
+    double growth_ = 100;
+    void addGrowth(double amount);
+    void feedingGrowth();
     double entryRemaining_ = 0;
     QPointF entryVelocity_;
     bool manualControl_ = false;

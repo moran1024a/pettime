@@ -157,6 +157,7 @@ void ApplicationController::makeMenu() {
         action->setChecked(i == 1);
         sizeGroup->addAction(action);
         const double value = scales[i];
+        action->setData(value);
         connect(action, &QAction::triggered, this, [this, value] {
             if (!primary_.juvenile)
                 primary_.scale = value;
@@ -209,15 +210,20 @@ void ApplicationController::refreshMenu() {
     affection_->setText(QString("好感度 %1 / 100 · %2").arg(a).arg(mood));
     feed_->setEnabled(!primary_.mealActive && !primary_.cosmeticFeeding && primary_.active());
     demo_->setEnabled(!primary_.juvenile && !primary_.cosmeticFeeding && primary_.active());
-    if (auto *sizes = menu_.findChild<QMenu *>("sizes"))
+    if (auto *sizes = menu_.findChild<QMenu *>("sizes")) {
         sizes->setEnabled(!primary_.juvenile);
+        for (auto *action : sizes->actions())
+            action->setChecked(std::abs(action->data().toDouble() - primary_.scale) < 1e-9);
+    }
     retry_->setVisible(dirty_);
 }
 std::uint64_t ApplicationController::selectedPet() const {
-    if (!petTable_ || petTable_->selectionModel()->selectedRows().size() != 1 ||
-        petTable_->currentRow() < 0)
+    if (!petTable_)
         return 0;
-    auto *item = petTable_->item(petTable_->currentRow(), 0);
+    const auto rows = petTable_->selectionModel()->selectedRows();
+    if (rows.size() != 1)
+        return 0;
+    auto *item = petTable_->item(rows[0].row(), 0);
     return item ? item->data(Qt::UserRole).toULongLong() : 0;
 }
 void ApplicationController::changeLimit() {
@@ -339,9 +345,9 @@ void ApplicationController::showPets() {
         auto *layout = new QVBoxLayout(petDialog_.get());
         petCount_ = new QLabel;
         layout->addWidget(petCount_);
-        petTable_ = new QTableWidget(0, 6);
+        petTable_ = new QTableWidget(0, 8);
         petTable_->setHorizontalHeaderLabels(
-            {"编号", "名称", "归属／来源", "动作", "所在设备", "派遣状态"});
+            {"编号", "名称", "归属／来源", "动作", "所在设备", "派遣状态", "成长度", "生长状态"});
         petTable_->setAutoScroll(false);
         petTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         petTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -383,7 +389,7 @@ void ApplicationController::showPets() {
         auto *buttons = new QHBoxLayout;
         renamePet_ = new QPushButton("重命名");
         highlightPet_ = new QPushButton("高亮定位");
-        feedPet_ = new QPushButton("播放投喂动画");
+        feedPet_ = new QPushButton("投喂");
         for (auto *button : {renamePet_, highlightPet_, feedPet_})
             buttons->addWidget(button);
         layout->addLayout(buttons);
@@ -410,7 +416,7 @@ void ApplicationController::showPets() {
                 [this] { dispatch_->recallPet(selectedPet()); });
         connect(recallAllPets_, &QPushButton::clicked, dispatch_.get(),
                 &DispatchController::recallAll);
-        layout->addWidget(new QLabel("此处投喂仅播放动画，不增加好感度。名称仅在本次运行保留。"));
+        layout->addWidget(new QLabel("此处投喂完成后仅为所选实体随机增加 1～5 点成长，不增加好感度。名称仅在本次运行保留。"));
         connect(petTable_, &QTableWidget::itemSelectionChanged, this,
                 &ApplicationController::refreshPets);
         connect(renamePet_, &QPushButton::clicked, this, [this] {
@@ -530,7 +536,8 @@ void ApplicationController::refreshPets() {
     for (const auto &p : swarm_.pets())
         add({QString::number(p->id), p->displayName(), p->primary ? "主实体" : "自有",
              p->entering() ? "入场中" : p->cosmeticFeeding ? "投喂动画" : states.at(int(p->state)), dispatch_->location(p->id),
-             dispatch_->stateText(p->id)},
+             dispatch_->stateText(p->id), QString::number(std::floor(p->growth() * 10) / 10, 'f', 1) + "%",
+             PetModel::growthState(p->growth())},
             p->id, "local:" + QString::number(p->id));
     auto keys = dispatch_->visitors().keys();
     std::sort(keys.begin(), keys.end());
@@ -539,7 +546,9 @@ void ApplicationController::refreshPets() {
         add({v.entity, v.name, "访客 · " + v.sourceName, states.at(int(v.current.state)), "本机",
              !v.active  ? "预留中"
              : v.frozen ? "等待重连"
-                        : "只读访客"},
+                        : "只读访客",
+             QString::number(std::floor(v.current.growth * 10) / 10, 'f', 1) + "%",
+             PetModel::growthState(v.current.growth)},
             0, "visitor:" + key);
     }
     validateControl();

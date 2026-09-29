@@ -149,8 +149,18 @@ class NetworkTest : public QObject {
         QSignalSpy highlights(&guest, &DispatchController::visitorHighlight);
         QVERIFY(owner.highlightPet(2));
         QTRY_COMPARE(highlights.count(), 1);
+        const double growthBefore = p->growth(), ageBefore = p->age;
         QVERIFY(p->playFeeding());
         QTRY_COMPARE(guest.visitors()[id].current.state, State::Food);
+        QTRY_VERIFY(!p->cosmeticFeeding);
+        const double bonus = p->growth() - growthBefore - (p->age - ageBefore) * 100 / 360;
+        QVERIFY(bonus >= 1 - 1e-8 && bonus <= 5 + 1e-8);
+        QCOMPARE(p->affection, 0);
+        QCOMPARE(source.primary().growth(), 100.0);
+        QTRY_VERIFY(std::abs(guest.visitors()[id].current.growth - p->growth()) < .1);
+        p->advance(360, {});
+        QTRY_COMPARE(guest.visitors()[id].current.growth, 100.0);
+        QVERIFY(!guest.visitors()[id].current.juvenile);
         QCOMPARE(target.totalCount(), 1);
         owner.recallPet(2);
         QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());

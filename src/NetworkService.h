@@ -20,7 +20,7 @@ class NetworkTest;
 class NetworkService : public QObject {
     Q_OBJECT
   public:
-    static constexpr int ProtocolVersion = 2;
+    static constexpr int ProtocolVersion = 3;
     static QString sourceFingerprint() { return QStringLiteral(PETTIME_SOURCE_FINGERPRINT); }
     static QString applicationVersion() { return QStringLiteral(PETTIME_VERSION); }
     struct Info {

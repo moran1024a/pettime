@@ -71,10 +71,118 @@ class TestPettime : public QObject {
     }
     void growthBoundaries() {
         QCOMPARE(PetModel::growthScale(-1), MinimumScale);
-        QCOMPARE(PetModel::growthScale(59.99), MinimumScale);
+        QCOMPARE(PetModel::growthScale(0), MinimumScale);
         QVERIFY(PetModel::growthScale(60) > MinimumScale);
-        QCOMPARE(PetModel::growthScale(360), AdultScale);
+        QCOMPARE(PetModel::growthScale(100), AdultScale);
         QCOMPARE(PetModel::growthScale(100000), AdultScale);
+    }
+    void growthMaturesIndependentlyOfLifetime() {
+        PetModel p(3, {500, 500}, {0, 0, 1000, 1000}, true);
+        QCOMPARE(p.growth(), 0.0);
+        p.age = 10000;
+        p.advance(89, {});
+        QVERIFY(p.growth() < 25);
+        QCOMPARE(PetModel::growthState(p.growth()), QString("幼体"));
+        p.advance(1, {});
+        QCOMPARE(PetModel::growthState(p.growth()), QString("成长中"));
+        p.advance(270, {});
+        QCOMPARE(p.growth(), 100.0);
+        QVERIFY(!p.juvenile);
+        QCOMPARE(p.scale, AdultScale);
+        p.scale = 1;
+        p.advance(20, {});
+        QCOMPARE(p.scale, 1.0);
+        p.id = 1;
+        p.affection = 42;
+        p.crush();
+        p.advance(1.1, {});
+        const auto lifetime = p.age;
+        p.becomeNymph();
+        QCOMPARE(p.id, quint64(1));
+        QCOMPARE(p.affection, 42);
+        QCOMPARE(p.age, lifetime);
+        QCOMPARE(p.growth(), 0.0);
+        QCOMPARE(p.scale, MinimumScale);
+        QVERIFY(p.juvenile);
+    }
+    void feedingGrowthIsLocalRandomAndOnce() {
+        QSet<int> bonuses;
+        for (int seed = 1; seed <= 40; ++seed) {
+            PetModel p(seed, {500, 500}, {0, 0, 1000, 1000}, true);
+            PetModel other = p;
+            QVERIFY(p.playFeeding());
+            p.advance(2.65, {});
+            const double bonus = p.growth() - 2.65 * 100 / 360;
+            QVERIFY(std::abs(bonus - std::round(bonus)) < 1e-9);
+            QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
+            bonuses.insert(qRound(bonus));
+            QCOMPARE(other.growth(), 0.0);
+            QCOMPARE(p.affection, 0);
+            const auto grown = p.growth();
+            p.advance(.1, {});
+            QVERIFY(std::abs(p.growth() - grown - .1 * 100 / 360) < 1e-9);
+        }
+        QCOMPARE(bonuses.size(), 5);
+        PetModel p(4, {500, 500}, {0, 0, 1000, 1000}, true);
+        QVERIFY(p.feed());
+        for (int i = 0; i < 1500 && p.mealActive; ++i)
+            p.advance(.02, {-1000, -1000});
+        QVERIFY(!p.mealActive);
+        QVERIFY(p.affection >= 3 && p.affection <= 5);
+        const double bonus = p.growth() - p.age * 100 / 360;
+        QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
+    }
+    void feedingCancellationFreezeAndCap() {
+        PetModel p(5, {500, 500}, {0, 0, 1000, 1000}, true);
+        QVERIFY(p.playFeeding());
+        p.advance(1, {});
+        const auto natural = p.growth();
+        p.crush();
+        p.advance(1.1, {});
+        QCOMPARE(p.growth(), natural);
+        p.becomeNymph();
+        QVERIFY(p.feed());
+        p.crush();
+        p.advance(1.1, {});
+        QCOMPARE(p.growth(), 0.0);
+        QCOMPARE(p.affection, 0);
+        p.becomeNymph();
+        p.advance(355, {});
+        QVERIFY(p.playFeeding());
+        p.advance(2.65, {});
+        QCOMPARE(p.growth(), 100.0);
+        QVERIFY(!p.juvenile);
+        SwarmController swarm(8);
+        swarm.spawn({400, 400}, {0, 0, 1000, 1000}, 1, 1);
+        auto *child = swarm.find(2);
+        QVERIFY(child->playFeeding());
+        child->dispatchPaused = true;
+        swarm.advance(20);
+        QCOMPARE(child->growth(), 0.0);
+        QCOMPARE(child->cosmeticAge, 0.0);
+        QVERIFY(!child->playFeeding());
+        child->dispatchPaused = false;
+        swarm.advance(2.65);
+        QVERIFY(child->growth() >= 1);
+    }
+    void matureChildSplitsIntoMinimumGrowthChildren() {
+        SwarmController swarm(3);
+        swarm.spawn({400, 400}, {0, 0, 1000, 1000}, 1, 1);
+        auto *p = swarm.find(2);
+        p->advance(360, {});
+        QVERIFY(!p->juvenile);
+        QVERIFY(!p->primary);
+        p->crush();
+        swarm.advance(1.1);
+        QVERIFY(!swarm.find(2));
+        for (const auto &child : swarm.pets()) {
+            if (child->primary)
+                continue;
+            QCOMPARE(child->growth(), 0.0);
+            QCOMPARE(child->scale, MinimumScale);
+            QVERIFY(child->juvenile);
+        }
+        QCOMPARE(swarm.primary().growth(), 100.0);
     }
     void chaseProbability() {
         QCOMPARE(PetModel::chaseChance(2), 0.0);
@@ -169,7 +277,7 @@ class TestPettime : public QObject {
             QCOMPARE(swarm.pendingCount(), std::size_t(0));
         }
     }
-    void cosmeticFeedingDoesNotChangeSimulation() {
+    void listFeedingPreservesAffectionAndAction() {
         for (bool isPrimary : {false, true}) {
             PetModel p(9, {500, 500}, {0, 0, 1000, 1000}, !isPrimary);
             p.primary = isPrimary;
@@ -188,8 +296,10 @@ class TestPettime : public QObject {
             QCOMPARE(p.generation, before.generation);
             QCOMPARE(p.splitReady, false);
             QVERIFY(p.age > before.age); // Natural growth still uses wall time.
-            PetModel copy = before;
-            QCOMPARE(p.random(0, 1), copy.random(0, 1));
+            if (!isPrimary) {
+                const double bonus = p.growth() - (p.age - before.age) * 100 / 360;
+                QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
+            }
             p.crush();
             QVERIFY(!p.playFeeding());
         }
@@ -226,7 +336,7 @@ class TestPettime : public QObject {
         for (auto *button : dialog->findChildren<QPushButton *>()) {
             if (button->text() == "重命名")
                 rename = button;
-            if (button->text() == "播放投喂动画")
+            if (button->text() == "投喂")
                 feed = button;
         }
         QVERIFY(rename && feed);
@@ -320,8 +430,8 @@ class TestPettime : public QObject {
             QVERIFY(region.contains({160, 160}));
         }
         p.becomeNymph();
-        p.age = 360;
-        p.advance(.001, {});
+        p.advance(360, {});
+        QVERIFY(!p.juvenile);
         for (int i = 0; i < 36; ++i) {
             p.heading = i * Pi / 18;
             const auto image = animation_->render(p, 224);

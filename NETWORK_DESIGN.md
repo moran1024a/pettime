@@ -36,7 +36,7 @@ IP 为当前或最近成功 TCP 连接的实际对端地址；同一实例多网
 
 ## 5. 发现协议：UDP
 
-UTF-8 JSON，每包最多 1024 字节；未知协议忽略。本端发送 protocol="pettime"、version=2，并增加 appVersion、fingerprint、deviceName、petCount、petLimit。扫描接收保留基本字段格式的其他协议版本（1～65535），但标记不兼容、禁止连接。
+UTF-8 JSON，每包最多 1024 字节；未知协议忽略。本端发送 protocol="pettime"、version=3，并增加 appVersion、fingerprint、deviceName、petCount、petLimit。扫描接收保留基本字段格式的其他协议版本（1～65535），但标记不兼容、禁止连接。
 
 请求字段：type="discover"、deviceId、sessionId、requestId（本轮随机 UUID）、tcpPort=21012。
 响应字段：type="announce"、deviceId、sessionId、requestId、tcpPort=21012。
@@ -57,7 +57,7 @@ UTF-8 JSON，每包最多 1024 字节；未知协议忽略。本端发送 protoc
 2. 被动方检查来源子网、版本、字段、身份冲突及连接方向，回复 helloAck，含相同 connectionId 和本机完整资料。
 3. 主动方校验 helloAck 与发现身份一致后发送 ready，回显 connectionId；主动方进入已连接，被动方收到有效 ready 后进入已连接。
 
-应用版本以 CMake PROJECT_VERSION 为唯一来源，严格比较完整字符串。扫描可展示不同版本、缺少版本号的旧客户端及协议版本不匹配设备，不对它们主动连接或重试；广播更新可以维持其列表可见性，但不代表互联成功。hello 与 helloAck 双向再次核对 appVersion、协议版本 2 和完整 fingerprint，缺失、不匹配或协议不兼容均拒绝进入就绪状态；资料更新也验证版本。已经完成握手的健康连接不允许 UDP 广告覆盖其协商版本。目标升级为匹配版本并重新开启服务后，可通过后续扫描重新互联。
+应用版本以 CMake PROJECT_VERSION 为唯一来源，严格比较完整字符串。扫描可展示不同版本、缺少版本号的旧客户端及协议版本不匹配设备，不对它们主动连接或重试；广播更新可以维持其列表可见性，但不代表互联成功。hello 与 helloAck 双向再次核对 appVersion、协议版本 3 和完整 fingerprint，缺失、不匹配或协议不兼容均拒绝进入就绪状态；资料更新也验证版本。已经完成握手的健康连接不允许 UDP 广告覆盖其协商版本。目标升级为匹配版本并重新开启服务后，可通过后续扫描重新互联。
 
 TCP 建连超时 3 秒；建立后握手最长 3 秒。握手前只允许对应握手消息，不接受资料更新和心跳。握手是协议及身份声明校验，不是认证。
 

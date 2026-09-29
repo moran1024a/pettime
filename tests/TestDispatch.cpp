@@ -56,6 +56,42 @@ class DispatchTest : public QObject {
         return v;
     }
   private slots:
+    void feedingTargetsSelectedRowRatherThanCurrentRow() {
+        QTemporaryDir dir;
+        AnimationLibrary animation;
+        RunOptions options;
+        options.population = 2;
+        ApplicationController app(animation, SettingsStore(dir.path()), options);
+        app.start();
+        app.timer_.stop();
+        app.showPets();
+        QCOMPARE(app.petTable_->currentRow(), 0);
+        app.selectPets(false);
+        QCOMPARE(app.selectedPet(), quint64(2));
+        app.feedPet_->click();
+        auto *child = app.swarm_.find(2);
+        QVERIFY(child->cosmeticFeeding);
+        QVERIFY(!app.primary_.cosmeticFeeding);
+        child->advance(2.65, {});
+        QVERIFY(child->growth() >= 1);
+        QCOMPARE(app.primary_.growth(), 100.0);
+        app.primary_.becomeNymph();
+        const auto childGrowth = child->growth();
+        app.petTable_->selectRow(0);
+        app.feedPet_->click();
+        QVERIFY(app.primary_.cosmeticFeeding);
+        app.primary_.advance(2.65, {});
+        QVERIFY(app.primary_.growth() >= 1);
+        QCOMPARE(child->growth(), childGrowth);
+        QCOMPARE(app.primary_.affection, 0);
+        app.primary_.advance(360, {});
+        app.refreshMenu();
+        QVERIFY(app.demo_->isEnabled());
+        const auto *sizes = app.menu_.findChild<QMenu *>("sizes");
+        QVERIFY(sizes && sizes->isEnabled());
+        for (const auto *action : sizes->actions())
+            QCOMPARE(action->isChecked(), action->data().toDouble() == AdultScale);
+    }
     void bulkSelectionKeepsViewportAndOwnership() {
         QTemporaryDir dir;
         AnimationLibrary animation;
@@ -323,7 +359,7 @@ class DispatchTest : public QObject {
             QCOMPARE(animation.render(model), animation.render(PetRenderState::from(model)));
         }
         model.primary = false;
-        model.juvenile = true;
+        model.becomeNymph();
         model.state = State::Probe;
         QVERIFY(model.playFeeding());
         const auto snap = PetRenderState::from(model);
@@ -339,6 +375,17 @@ class DispatchTest : public QObject {
         QVERIFY(!PetRenderState::decode(bad, decoded));
         bad = snap.encode();
         bad[10] = 0;
+        QVERIFY(!PetRenderState::decode(bad, decoded));
+        QCOMPARE(decoded.growth, snap.growth);
+        bad = snap.encode();
+        bad[16] = 101;
+        QVERIFY(!PetRenderState::decode(bad, decoded));
+        bad[16] = -1;
+        QVERIFY(!PetRenderState::decode(bad, decoded));
+        bad[16] = 100; // Juvenile flag cannot disagree with maturity.
+        QVERIFY(!PetRenderState::decode(bad, decoded));
+        bad = snap.encode();
+        bad.removeLast();
         QVERIFY(!PetRenderState::decode(bad, decoded));
     }
     void visitorWindowIsReadOnly() {
@@ -478,6 +525,11 @@ class DispatchTest : public QObject {
         app.dispatch_->visitors_.insert(v.id, v);
         app.showPets();
         QCOMPARE(app.petTable_->rowCount(), 4);
+        QCOMPARE(app.petTable_->columnCount(), 8);
+        QCOMPARE(app.petTable_->item(0, 6)->text(), QString("100.0%"));
+        QCOMPARE(app.petTable_->item(0, 7)->text(), QString("成体"));
+        QCOMPARE(app.petTable_->item(1, 7)->text(), QString("幼体"));
+        QCOMPARE(app.petTable_->item(3, 6)->text(), QString("100.0%"));
         app.petTable_->selectRow(3);
         QCOMPARE(app.selectedPet(), quint64(0));
         QVERIFY(app.expelPet_->isEnabled());

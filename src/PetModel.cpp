@@ -19,7 +19,8 @@ QPointF clampPoint(QPointF p, QRectF area, double margin) {
 
 PetModel::PetModel(std::uint32_t seed, QPointF center, QRectF bounds, bool young)
     : position(center), area(bounds), juvenile(young), rng_(seed) {
-    scale = young ? MinimumScale : AdultScale;
+    growth_ = young ? 0 : 100;
+    scale = growthScale(growth_);
     nextSpecial_ = young ? random(1.8, 4.2) : random(20, 50);
     setArea(bounds);
     if (young)
@@ -32,9 +33,24 @@ double PetModel::random(double low, double high) {
 double PetModel::chaseChance(int count) {
     return count < 3 ? 0 : std::min(.7, .12 + (count - 3) * .1);
 }
-double PetModel::growthScale(double age) {
-    const int stage = std::min(6, static_cast<int>(std::max(0.0, age) / 60));
-    return MinimumScale + (AdultScale - MinimumScale) * stage / 6;
+double PetModel::growthScale(double growth) {
+    return MinimumScale + (AdultScale - MinimumScale) * std::clamp(growth, 0.0, 100.0) / 100;
+}
+QString PetModel::growthState(double growth) {
+    return growth >= 100 ? QStringLiteral("成体")
+         : growth >= 25 ? QStringLiteral("成长中") : QStringLiteral("幼体");
+}
+void PetModel::addGrowth(double amount) {
+    if (growth_ >= 100)
+        return; // Preserve the adult primary's user-selected display size.
+    growth_ = std::min(100.0, growth_ + amount);
+    if (growth_ > 100 - 1e-9)
+        growth_ = 100;
+    juvenile = growth_ < 100;
+    scale = growthScale(growth_);
+}
+void PetModel::feedingGrowth() {
+    addGrowth(std::uniform_int_distribution<int>(1, 5)(rng_));
 }
 bool PetModel::frontal() const {
     return !juvenile && crashQueued &&
@@ -91,14 +107,14 @@ QString PetModel::displayName() const {
                                   : customName;
 }
 bool PetModel::playFeeding() {
-    if (!active() || entering() || mealActive || cosmeticFeeding || frontal())
+    if (!active() || dispatchPaused || entering() || mealActive || cosmeticFeeding || frontal())
         return false;
     cosmeticFeeding = true;
     cosmeticAge = 0;
     return true;
 }
 bool PetModel::feed() {
-    if (mealActive || cosmeticFeeding || !active())
+    if (mealActive || cosmeticFeeding || dispatchPaused || entering() || !active())
         return false;
     mealActive = true;
     eating = false;
@@ -146,7 +162,8 @@ void PetModel::becomeNymph() {
     juvenile = true;
     ++generation;
     scale = MinimumScale;
-    age = 0;
+    growth_ = 0;
+    cosmeticFeeding = mealActive = eating = false;
     splitReady = false;
     enter(State::Probe, random(.55, 1.4));
     speed = 0;
@@ -235,17 +252,19 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
     impact = false;
     if (!std::isfinite(dt) || dt <= 0 || expired || splitReady)
         return;
-    // Growth follows lifetime; paused actions and their visual frames share actionAge.
+    // Lifetime and growth are independent; frozen dispatch simulation does not advance.
     age += dt;
     sinceEvade_ += dt;
     if (sinceEvade_ >= 5)
         evadeCount = 0;
-    if (juvenile)
-        scale = growthScale(age);
+    if (active())
+        addGrowth(dt * (100.0 / 360));
     if (cosmeticFeeding) {
         cosmeticAge += dt;
-        if (cosmeticAge >= 2.65)
+        if (cosmeticAge >= 2.65) {
             cosmeticFeeding = false;
+            feedingGrowth();
+        }
         previousCursor_ = cursor;
         haveCursor_ = true;
         return;
@@ -319,6 +338,7 @@ void PetModel::updatePrimary(double dt, QPointF cursor) {
             eatingAge_ += dt;
             if (eatingAge_ >= 1.15) {
                 affection = std::min(100, affection + mealGain_);
+                feedingGrowth();
                 mealActive = eating = false;
                 enter(State::Happy, affection < 20   ? 1.5
                                     : affection < 50 ? 2.1

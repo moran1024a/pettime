@@ -12,6 +12,7 @@ struct PetRenderState {
     bool juvenile = false, primary = false, paused = false, dragging = false, menuOpen = false,
          mealActive = false, crashQueued = false;
     int affection = 0;
+    double growth = 100;
     double scale = AdultScale, heading = 0, speed = 0, phase = 0, idlePhase = 0, actionAge = 0,
            actionDuration = 1, flightDuration = 1.15, pounceSpeed = 1;
     bool frontal() const {
@@ -25,6 +26,7 @@ struct PetRenderState {
     static PetRenderState from(const PetModel &p) {
         PetRenderState s;
         s.position = p.position;
+        s.growth = p.growth();
         s.mealPosition = p.mealPosition;
         s.state = p.state;
         s.juvenile = p.juvenile;
@@ -58,13 +60,13 @@ struct PetRenderState {
         return {position.x(),    position.y(),   int(state),  juvenile,   scale,
                 heading,         speed,          phase,       idlePhase,  actionAge,
                 actionDuration,  flightDuration, pounceSpeed, mealActive, mealPosition.x(),
-                mealPosition.y()};
+                mealPosition.y(), growth};
     }
     static bool decode(const QJsonValue &v, PetRenderState &s) {
         if (!v.isArray())
             return false;
         const auto a = v.toArray();
-        if (a.size() != 16 || !a[3].isBool() || !a[13].isBool())
+        if (a.size() != 17 || !a[3].isBool() || !a[13].isBool())
             return false;
         for (int i = 0; i < a.size(); ++i)
             if (i != 3 && i != 13 &&
@@ -75,13 +77,15 @@ struct PetRenderState {
         if (st != std::floor(st) || st < 0 || st > int(State::Fade) || a[4].toDouble() < .1 ||
             a[4].toDouble() > 2 || a[9].toDouble() < 0 || a[10].toDouble() <= 0 ||
             a[11].toDouble() < .5 || a[12].toDouble() <= 0 || a[7].toDouble() < 0 ||
-            a[8].toDouble() < 0)
+            a[8].toDouble() < 0 || a[16].toDouble() < 0 || a[16].toDouble() > 100 ||
+            a[3].toBool() != (a[16].toDouble() < 100))
             return false;
         s = {};
         s.position = {a[0].toDouble(), a[1].toDouble()};
         s.state = State(int(st));
         s.juvenile = a[3].toBool();
         s.scale = a[4].toDouble();
+        s.growth = a[16].toDouble();
         s.heading = a[5].toDouble();
         s.speed = a[6].toDouble();
         s.phase = a[7].toDouble();
