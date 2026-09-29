@@ -1,5 +1,6 @@
 #pragma once
 #include "SettingsStore.h"
+#include "SourceFingerprint.h"
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QHash>
@@ -19,6 +20,8 @@ class NetworkTest;
 class NetworkService : public QObject {
     Q_OBJECT
   public:
+    static constexpr int ProtocolVersion = 2;
+    static QString sourceFingerprint() { return QStringLiteral(PETTIME_SOURCE_FINGERPRINT); }
     static QString applicationVersion() { return QStringLiteral(PETTIME_VERSION); }
     struct Info {
         int count = 1;
@@ -26,7 +29,7 @@ class NetworkService : public QObject {
         int dispatched = 0, visitors = 0;
     };
     struct Device {
-        QString id, name, address, state, appVersion;
+        QString id, name, address, state, appVersion, fingerprint;
         int protocolVersion = 0;
         bool compatible = false;
         quint16 port = 0;
@@ -39,6 +42,7 @@ class NetworkService : public QObject {
     struct Options {
         quint16 port = 21012;
         QString appVersion = applicationVersion();
+        QString fingerprint = sourceFingerprint();
         bool loopbackOnly = false;
         QList<QPair<QHostAddress, quint16>> discoveryTargets;
         std::function<qint64()> now;
@@ -51,6 +55,7 @@ class NetworkService : public QObject {
     void stop();
     void refresh();
     void enableDispatch() { dispatchEnabled_ = true; }
+    QString localFingerprint() const { return options_.fingerprint; }
     QString localVersion() const { return options_.appVersion; }
     QString deviceId() const { return id_; }
     QString sessionId() const { return session_; }

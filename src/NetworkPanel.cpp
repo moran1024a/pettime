@@ -1,5 +1,6 @@
 #include "NetworkPanel.h"
 #include <QHeaderView>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSysInfo>
 #include <QVBoxLayout>
@@ -18,11 +19,12 @@ NetworkPanel::NetworkPanel(NetworkService &service, QWidget *parent)
     local_ = new QLabel(this);
     local_->setTextFormat(Qt::PlainText);
     local_->setWordWrap(true);
-    table_ = new QTableWidget(0, 11, this);
+    table_ = new QTableWidget(0, 13, this);
     table_->setObjectName("networkDevices");
     table_->setHorizontalHeaderLabels({"设备名", "IP", "端口", "数量", "上限", "连接状态",
-                                       "最后通讯", "派出", "访客 / 144", "派遣能力", "版本"});
+                                       "最后通讯", "派出", "访客 / 144", "派遣能力", "版本", "协议", "源码指纹"});
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table_->setAutoScroll(false);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
@@ -71,10 +73,16 @@ void NetworkPanel::updateView() {
             .arg(service_.port())
             .arg(info.dispatched)
             .arg(info.visitors) +
-        "\n本机版本：" + service_.localVersion());
+        "\n本机版本：" + service_.localVersion() + " · 协议：" +
+        QString::number(NetworkService::ProtocolVersion) + " · 源码指纹：" + service_.localFingerprint().left(12));
+    const int scrollY = table_->verticalScrollBar()->value();
+    const int scrollX = table_->horizontalScrollBar()->value();
     QString selected;
     if (table_->currentRow() >= 0 && table_->item(table_->currentRow(), 0))
         selected = table_->item(table_->currentRow(), 0)->data(Qt::UserRole).toString();
+    const QSignalBlocker tableBlocker(table_);
+    table_->clearSelection();
+    table_->setCurrentCell(-1, -1);
     const auto devices = service_.devices();
     table_->setRowCount(devices.size());
     int online = 0;
@@ -92,7 +100,9 @@ void NetworkPanel::updateView() {
                                  QString::number(d.dispatched),
                                  QString::number(d.visitors),
                                  d.dispatch ? "支持" : "不支持或未握手",
-                                 d.appVersion.isEmpty() ? "未知" : d.appVersion};
+                                 d.appVersion.isEmpty() ? "未知" : d.appVersion,
+                                 QString::number(d.protocolVersion),
+                                 d.fingerprint.isEmpty() ? "未知" : d.fingerprint.left(12)};
         for (int col = 0; col < values.size(); ++col) {
             auto *item = table_->item(row, col);
             if (!item) {
@@ -100,6 +110,8 @@ void NetworkPanel::updateView() {
                 table_->setItem(row, col, item);
             }
             item->setText(values[col]);
+            if (col == 12)
+                item->setToolTip(d.fingerprint);
             item->setData(Qt::UserRole, d.id);
             item->setForeground(d.state.startsWith("已连接")
                                     ? palette().brush(QPalette::Text)
@@ -108,6 +120,8 @@ void NetworkPanel::updateView() {
         if (d.id == selected)
             table_->selectRow(row);
     }
+    table_->verticalScrollBar()->setValue(scrollY);
+    table_->horizontalScrollBar()->setValue(scrollX);
     count_->setText(QString("已连接 %1 台，共发现 %2 台").arg(online).arg(devices.size()));
 }
 } // namespace pettime

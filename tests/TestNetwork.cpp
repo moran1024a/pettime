@@ -5,6 +5,7 @@
 #include <QNetworkDatagram>
 #include <QNetworkProxy>
 #include <QTemporaryDir>
+#include <QScrollBar>
 #include <QUuid>
 #include <QtEndian>
 #include <QtTest>
@@ -29,7 +30,7 @@ void identity(const QString &dir, const QString &id) {
 QByteArray frame(QJsonObject o) {
     o["protocol"] = "pettime";
     if (!o.contains("version"))
-        o["version"] = 1;
+        o["version"] = NetworkService::ProtocolVersion;
     const auto body = QJsonDocument(o).toJson(QJsonDocument::Compact);
     QByteArray bytes(4, '\0');
     qToBigEndian<quint32>(quint32(body.size()), bytes.data());
@@ -38,6 +39,7 @@ QByteArray frame(QJsonObject o) {
 QJsonObject hello(const QString &id = firstId) {
     return {{"type", "hello"},
             {"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
             {"deviceId", id},
             {"sessionId", uuid()},
             {"deviceName", "测试设备 <b>文本</b>"},
@@ -80,6 +82,30 @@ class NetworkTest : public QObject {
     Q_OBJECT
   private slots:
     void initTestCase() { QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy); }
+    void deviceRefreshKeepsViewport() {
+        Pair p;
+        for (int i = 0; i < 30; ++i) {
+            const auto id = uuid();
+            auto &d = p.a->peers_[id].device;
+            d.id = id;
+            d.name = QString("host-%1").arg(i, 2, 10, QLatin1Char('0'));
+        }
+        NetworkPanel panel(*p.a);
+        panel.show();
+        QTest::qWait(30);
+        auto *table = panel.findChild<QTableWidget *>("networkDevices");
+        QCOMPARE(table->rowCount(), 30);
+        table->selectRow(0);
+        auto *bar = table->verticalScrollBar();
+        QVERIFY(bar->maximum() > 0);
+        bar->setValue(bar->maximum());
+        const int before = bar->value();
+        emit p.a->changed();
+        QTest::qWait(30);
+        QCOMPARE(bar->value(), before);
+        QCOMPARE(table->selectionModel()->selectedRows().size(), 1);
+        QCOMPARE(table->selectionModel()->selectedRows()[0].row(), 0);
+    }
     void manualMovementOverRealConnection() {
         Pair pair;
         SwarmController source(1, {400, 400}, {0, 0, 1280, 720});
@@ -94,14 +120,25 @@ class NetworkTest : public QObject {
             source.advance(.02);
         });
         timer.start(20);
+        PetRenderState firstFrame;
+        bool sawActivation = false;
+        connect(pair.b.get(), &NetworkService::dispatchMessage, this,
+                [&](const QString &, const QString &, const QJsonObject &message) {
+            if (message["op"] == "activate" && !sawActivation)
+                sawActivation = PetRenderState::decode(message["state"], firstFrame);
+        });
         QVERIFY(pair.start());
         QTRY_VERIFY(pair.connected());
         owner.dispatchPets({2}, pair.b->deviceId());
         QTRY_VERIFY(owner.outgoing().contains(2) &&
                     owner.outgoing()[2].phase == DispatchController::Phase::Active);
+        QVERIFY(sawActivation);
+        QVERIFY(firstFrame.position.x() == 0 || firstFrame.position.x() == 1280 ||
+                firstFrame.position.y() == 0 || firstFrame.position.y() == 720);
         const QString id = owner.outgoing()[2].id;
         QTRY_VERIFY(guest.visitors().contains(id) && guest.visitors()[id].sequence > 0);
         auto *p = source.find(2);
+        QTRY_VERIFY(!p->entering());
         QVERIFY(p->setManualControl(true));
         p->moveTo({400, 400}, p->area);
         p->setManualDirection({1, 0});
@@ -118,6 +155,31 @@ class NetworkTest : public QObject {
         owner.recallPet(2);
         QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());
         QVERIFY(!owner.isAway(2));
+        QVERIFY(!p->manuallyControlled());
+        // Expel during entry, before manual input is allowed.
+        owner.dispatchPets({2}, pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::Active);
+        const auto enteringId = owner.outgoing()[2].id;
+        QVERIFY(p->entering());
+        QVERIFY(guest.expelVisitor(enteringId));
+        QTRY_VERIFY(owner.outgoing().isEmpty());
+        QVERIFY(!p->entering());
+        QVERIFY(guest.visitors().isEmpty());
+        // Expel while disconnected; reconnect must reconcile without resurrection.
+        owner.dispatchPets({2}, pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::Active);
+        const auto offlineId = owner.outgoing()[2].id;
+        pair.a->disconnectPeer(pair.b->deviceId());
+        QTRY_VERIFY(guest.visitors()[offlineId].frozen);
+        QVERIFY(guest.expelVisitor(offlineId));
+        pair.time += 1000;
+        pair.a->refresh();
+        pair.b->refresh();
+        QTRY_VERIFY(pair.connected());
+        QTRY_VERIFY(owner.outgoing().isEmpty());
+        QVERIFY(guest.visitors().isEmpty());
     }
     void identityPersistenceAndErrors() {
         QTemporaryDir dir;
@@ -180,6 +242,50 @@ class NetworkTest : public QObject {
         udp.close();
         QVERIFY(p.a->start());
     }
+    void fingerprintMismatchRemainsVisible() {
+        Pair p;
+        p.b->options_.fingerprint = QString(64, '0');
+        QVERIFY(p.start());
+        QTRY_COMPARE(p.a->devices().size(), 1);
+        QTRY_COMPARE(p.b->devices().size(), 1);
+        QCOMPARE(p.a->devices()[0].state, QString("源码指纹不匹配，无法互联"));
+        for (int i = 0; i < 3; ++i) {
+            p.time += 10000;
+            p.a->refresh();
+            p.b->refresh();
+            QTest::qWait(10);
+            QVERIFY(p.a->connections_.isEmpty());
+            QVERIFY(p.b->connections_.isEmpty());
+        }
+        p.b->stop();
+        p.b->options_.fingerprint = NetworkService::sourceFingerprint();
+        QVERIFY(p.b->start());
+        p.time += 1000;
+        p.a->refresh();
+        p.b->refresh();
+        QTRY_VERIFY(p.connected());
+    }
+    void fingerprintHandshakeGate_data() {
+        QTest::addColumn<QString>("fingerprint");
+        QTest::newRow("missing") << QString{};
+        QTest::newRow("invalid") << QString(64, 'z');
+        QTest::newRow("different") << QString(64, '0');
+    }
+    void fingerprintHandshakeGate() {
+        QFETCH(QString, fingerprint);
+        Pair p;
+        QVERIFY(p.b->start());
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, p.b->port());
+        QTRY_COMPARE(client.state(), QAbstractSocket::ConnectedState);
+        auto h = hello();
+        h["fingerprint"] = fingerprint;
+        client.write(frame(h));
+        QTRY_COMPARE(client.state(), QAbstractSocket::UnconnectedState);
+        QVERIFY(p.b->connections_.isEmpty());
+        QCOMPARE(p.b->devices().size(), 1);
+        QVERIFY(!p.b->devices()[0].compatible);
+    }
     void differentVersionsRemainDiscoverableAndNeverConnect() {
         Pair p;
         p.b->options_.appVersion = "99.0.0";
@@ -217,7 +323,7 @@ class NetworkTest : public QObject {
         QVERIFY(p.b->start());
         QUdpSocket sender;
         QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
-        QJsonObject o{{"protocol", "pettime"}, {"version", 1},        {"type", "discover"},
+        QJsonObject o{{"protocol", "pettime"}, {"version", NetworkService::ProtocolVersion},        {"type", "discover"},
                       {"deviceId", firstId},   {"sessionId", uuid()}, {"requestId", uuid()},
                       {"tcpPort", p.a->port()}};
         auto publish = [&] {
@@ -229,7 +335,7 @@ class NetworkTest : public QObject {
         QCOMPARE(p.b->devices()[0].state, QString("版本未知，无法互联"));
         QVERIFY(p.b->connections_.isEmpty());
         p.time += 1000;
-        o["version"] = 2;
+        o["version"] = NetworkService::ProtocolVersion + 1;
         o["appVersion"] = NetworkService::applicationVersion();
         publish();
         QTRY_COMPARE(p.b->devices()[0].state, QString("协议版本不匹配，无法互联"));
@@ -258,14 +364,21 @@ class NetworkTest : public QObject {
         QCOMPARE(p.b->devices().size(), 1);
         QVERIFY(!p.b->devices()[0].compatible);
     }
+    void outboundHandshakeRechecksAdvertisedVersion_data() {
+        QTest::addColumn<QString>("field");
+        QTest::newRow("version") << QString("appVersion");
+        QTest::newRow("fingerprint") << QString("fingerprint");
+    }
     void outboundHandshakeRechecksAdvertisedVersion() {
+        QFETCH(QString, field);
         Pair p;
         QTcpServer remote;
         QVERIFY(remote.listen(QHostAddress::LocalHost, p.b->port()));
         QVERIFY(p.a->start());
         const auto session = uuid();
-        p.a->candidate({{"version", 1},
+        p.a->candidate({{"version", NetworkService::ProtocolVersion},
                         {"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                         {"deviceId", secondId},
                         {"sessionId", session},
                         {"tcpPort", p.b->port()}},
@@ -279,10 +392,11 @@ class NetworkTest : public QObject {
         reply["type"] = "helloAck";
         reply["sessionId"] = session;
         reply["connectionId"] = request["connectionId"];
-        reply["appVersion"] = "99.0.0";
+        reply[field] = field == "appVersion" ? QString("99.0.0") : QString(64, '0');
         socket->write(frame(reply));
         QTRY_VERIFY(p.a->connections_.isEmpty());
-        QCOMPARE(p.a->devices()[0].state, QString("版本不匹配，无法互联"));
+        QCOMPARE(p.a->devices()[0].state, field == "appVersion" ? QString("版本不匹配，无法互联")
+                                                              : QString("源码指纹不匹配，无法互联"));
         QVERIFY(!p.a->devices()[0].compatible);
         p.a->tryConnect(secondId);
         QVERIFY(p.a->connections_.isEmpty());
@@ -455,7 +569,7 @@ class NetworkTest : public QObject {
         qToBigEndian<quint32>(8193, large.data());
         QTest::newRow("oversize") << large;
         auto h = hello();
-        h["version"] = 2;
+        h["version"] = NetworkService::ProtocolVersion + 1;
         QTest::newRow("version") << frame(h);
         h = hello();
         h["petCount"] = 73;
@@ -511,16 +625,18 @@ class NetworkTest : public QObject {
         duplicate.write(frame(h));
         QTRY_COMPARE(duplicate.state(), QAbstractSocket::UnconnectedState);
         QCOMPARE(p.b->peers_[firstId].socket, existing);
-        p.b->candidate({{"version", 1},
+        p.b->candidate({{"version", NetworkService::ProtocolVersion},
                         {"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                         {"deviceId", firstId},
                         {"sessionId", uuid()},
                         {"tcpPort", p.a->port()}},
                        QHostAddress::LocalHost, false);
         QCOMPARE(p.b->peers_[firstId].socket, existing);
         QCOMPARE(p.b->peers_[firstId].device.state, QString("身份冲突"));
-        p.b->candidate({{"version", 1},
+        p.b->candidate({{"version", NetworkService::ProtocolVersion},
                         {"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                         {"deviceId", secondId},
                         {"sessionId", uuid()},
                         {"tcpPort", p.a->port()}},
@@ -545,8 +661,9 @@ class NetworkTest : public QObject {
         sender.setProxy(QNetworkProxy::NoProxy);
         QVERIFY(sender.bind(QHostAddress::LocalHost, 0));
         QJsonObject o{{"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                       {"protocol", "pettime"},
-                      {"version", 1},
+                      {"version", NetworkService::ProtocolVersion},
                       {"type", "announce"},
                       {"deviceId", firstId},
                       {"sessionId", uuid()},
@@ -596,8 +713,9 @@ class NetworkTest : public QObject {
         QTcpServer remote;
         QVERIFY(remote.listen(QHostAddress::LocalHost, p.b->port()));
         QVERIFY(p.a->start());
-        p.a->candidate({{"version", 1},
+        p.a->candidate({{"version", NetworkService::ProtocolVersion},
                         {"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                         {"deviceId", secondId},
                         {"sessionId", uuid()},
                         {"tcpPort", p.b->port()}},
@@ -625,8 +743,9 @@ class NetworkTest : public QObject {
         auto h = hello();
         const QString request = uuid();
         const QJsonObject discovery{{"appVersion", NetworkService::applicationVersion()},
+            {"fingerprint", NetworkService::sourceFingerprint()},
                                     {"protocol", "pettime"},
-                                    {"version", 1},
+                                    {"version", NetworkService::ProtocolVersion},
                                     {"type", "discover"},
                                     {"deviceId", firstId},
                                     {"sessionId", h["sessionId"]},

@@ -2,6 +2,8 @@
 #include "DispatchController.h"
 #include "PetWindow.h"
 #include <QTemporaryDir>
+#include <QScreen>
+#include <QScrollBar>
 #include <QUuid>
 #include <QtTest>
 
@@ -54,6 +56,125 @@ class DispatchTest : public QObject {
         return v;
     }
   private slots:
+    void bulkSelectionKeepsViewportAndOwnership() {
+        QTemporaryDir dir;
+        AnimationLibrary animation;
+        RunOptions options;
+        options.population = 30;
+        ApplicationController app(animation, SettingsStore(dir.path()), options);
+        app.start();
+        app.timer_.stop();
+        DispatchController::Outgoing away;
+        away.entity = 2;
+        away.phase = DispatchController::Phase::Active;
+        app.dispatch_->outgoing_.insert(2, away);
+        for (int i = 0; i < 3; ++i) {
+            DispatchController::Visitor v;
+            v.id = uuid();
+            v.entity = QString::number(i + 2);
+            v.active = true;
+            app.dispatch_->visitors_.insert(v.id, v);
+        }
+        app.showPets();
+        QTest::qWait(30);
+        auto *bar = app.petTable_->verticalScrollBar();
+        QVERIFY(bar->maximum() > 0);
+        bar->setValue(bar->maximum() / 2);
+        const int before = bar->value();
+        auto *local = app.petDialog_->findChild<QPushButton *>("selectLocalPets");
+        auto *visitors = app.petDialog_->findChild<QPushButton *>("selectVisitorPets");
+        QVERIFY(local && visitors);
+        local->click();
+        auto rows = app.petTable_->selectionModel()->selectedRows();
+        QCOMPARE(rows.size(), 28);
+        for (const auto &row : rows) {
+            const auto id = app.petTable_->item(row.row(), 0)->data(Qt::UserRole).toULongLong();
+            QVERIFY(id > 2);
+        }
+        QCOMPARE(bar->value(), before);
+        visitors->click();
+        QCOMPARE(app.petTable_->selectionModel()->selectedRows().size(), 3);
+        QVERIFY(!app.controlPet_->isEnabled());
+        QVERIFY(!app.dispatchPet_->isEnabled());
+        app.refreshPets();
+        QTest::qWait(30);
+        QCOMPARE(bar->value(), before);
+        app.petTable_->setCurrentCell(0, 0);
+        app.refreshPets();
+        QTest::qWait(30);
+        QCOMPARE(bar->value(), before);
+        app.dispatch_->visitors_.clear();
+        app.refreshPets();
+        visitors->click();
+        QVERIFY(app.petTable_->selectionModel()->selectedRows().isEmpty());
+    }
+    void visitorWindowClipsAtEntryEdge() {
+        AnimationLibrary animation;
+        PetWindow window(animation);
+        const auto area = QGuiApplication::primaryScreen()->availableGeometry();
+        PetRenderState state;
+        state.position = {double(area.left()), double(area.center().y())};
+        window.presentRemote(state, "entry", false);
+        window.show();
+        QTest::qWait(30);
+        window.presentRemote(state, "entry", false);
+        const auto visible = window.mask().translated(window.pos());
+        QVERIFY(!visible.isEmpty());
+        QVERIFY(QRegion(area).contains(visible.boundingRect()));
+        QCOMPARE(window.pos().x(), area.left() - window.width() / 2);
+    }
+    void edgeEntryAndFreeze() {
+        const QRectF area(-500, 20, 900, 600);
+        for (int edge = 0; edge < 4; ++edge) {
+            Fixture f;
+            auto *p = f.swarm.find(2);
+            p->beginEntry(area, edge, .5);
+            const auto start = p->position;
+            QVERIFY(p->entering());
+            QVERIFY(start.x() == area.left() || start.x() == area.right() ||
+                    start.y() == area.top() || start.y() == area.bottom());
+            QVERIFY(!p->setManualControl(true));
+            QVERIFY(!p->playFeeding());
+            p->dispatchPaused = true;
+            f.swarm.advance(10);
+            QCOMPARE(p->position, start);
+            QVERIFY(p->entering());
+            p->setArea(area); // Resume must not clamp an entry to the interior.
+            QCOMPARE(p->position, start);
+            p->dispatchPaused = false;
+            for (int i = 0; i < 10; ++i)
+                f.swarm.advance(.1);
+            QVERIFY(!p->entering());
+            QVERIFY(area.adjusted(35, 35, -35, -35).contains(p->position));
+            QVERIFY(QLineF(start, p->position).length() > 90);
+            QVERIFY(p->setManualControl(true));
+            QVERIFY(p->playFeeding());
+        }
+    }
+    void expulsionRejectsLateActivationAndWrongOwner() {
+        Fixture f;
+        health(f);
+        auto v = visitor(f);
+        f.controller.visitors_[v.id].frozen = true;
+        QVERIFY(f.controller.expelVisitor(v.id));
+        QVERIFY(!f.controller.expelVisitor(v.id));
+        QVERIFY(f.controller.visitors_.isEmpty());
+        QVERIFY(f.controller.ended_[peer].contains(v.id));
+        f.controller.receive(peer, session, {{"op", "activate"}, {"id", v.id},
+            {"stream", v.stream}, {"name", "late"}, {"state", v.current.encode()}});
+        QVERIFY(f.controller.visitors_.isEmpty());
+        auto o = outgoing(f);
+        auto *p = f.swarm.find(2);
+        p->beginEntry({0, 0, 1280, 720}, 0, .5);
+        f.controller.receive(peer, uuid(), {{"op", "expelled"}, {"id", o.id}});
+        QVERIFY(f.controller.outgoing_.contains(2));
+        f.controller.receive(peer, session, {{"op", "expelled"}, {"id", o.id}});
+        QVERIFY(f.controller.outgoing_.isEmpty());
+        QVERIFY(!p->entering());
+        QCOMPARE(p->position, o.home);
+        f.controller.receive(peer, session, {{"op", "expelled"}, {"id", o.id}});
+        QCOMPARE(p->position, o.home);
+    }
     void manualMovementAndLifecycle() {
         PetModel p(7, {500, 400}, {0, 0, 1280, 720}, true);
         QVERIFY(!p.setManualControl(true)); // Primary is never controllable.
@@ -359,6 +480,7 @@ class DispatchTest : public QObject {
         QCOMPARE(app.petTable_->rowCount(), 4);
         app.petTable_->selectRow(3);
         QCOMPARE(app.selectedPet(), quint64(0));
+        QVERIFY(app.expelPet_->isEnabled());
         QVERIFY(!app.controlPet_->isEnabled());
         QVERIFY(!app.renamePet_->isEnabled());
         QVERIFY(!app.feedPet_->isEnabled());
@@ -372,8 +494,15 @@ class DispatchTest : public QObject {
         app.refreshPets();
         QCOMPARE(app.petTable_->selectionModel()->selectedRows().size(), 2);
         QVERIFY(app.dispatchPet_->isEnabled());
+        QVERIFY(!app.expelPet_->isEnabled());
         QVERIFY(!app.controlPet_->isEnabled());
         QVERIFY(!app.renamePet_->isEnabled());
+        app.petTable_->clearSelection();
+        app.petTable_->selectRow(3);
+        QVERIFY(app.expelPet_->isEnabled());
+        app.expelPet_->click();
+        QVERIFY(app.dispatch_->visitors_.isEmpty());
+        QCOMPARE(app.petTable_->rowCount(), 3);
     }
     void resumeCommitDoesNotExtendGraceWithoutSourceConfirmation() {
         Fixture f;

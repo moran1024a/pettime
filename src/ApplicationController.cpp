@@ -12,6 +12,7 @@
 #include <QRandomGenerator>
 #include <QSaveFile>
 #include <QScreen>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -234,9 +235,18 @@ void ApplicationController::changeLimit() {
     if (!store_.saveLimit(value, &error))
         warn("数量上限已在本次运行生效，但未能保存。请通过数量上限菜单重试。\n" + error);
 }
+QString ApplicationController::selectedVisitor() const {
+    if (!petTable_)
+        return {};
+    const auto rows = petTable_->selectionModel()->selectedRows();
+    if (rows.size() != 1)
+        return {};
+    const auto key = petTable_->item(rows[0].row(), 0)->data(Qt::UserRole + 1).toString();
+    return key.startsWith("visitor:") ? key.mid(8) : QString{};
+}
 bool ApplicationController::canStartControl(quint64 id) const {
     const auto *p = swarm_.find(id);
-    return p && !p->primary && p->active() && !p->expired && !p->splitReady &&
+    return p && !p->primary && !p->entering() && p->active() && !p->expired && !p->splitReady &&
            !p->dispatchPaused && dispatch_->canControl(id);
 }
 void ApplicationController::clearControlKeys() {
@@ -300,6 +310,27 @@ bool ApplicationController::eventFilter(QObject *object, QEvent *event) {
     return true;
 }
 
+void ApplicationController::selectPets(bool visitors) {
+    if (!petTable_)
+        return;
+    const QSignalBlocker blocker(petTable_);
+    QItemSelection selection;
+    for (int row = 0; row < petTable_->rowCount(); ++row) {
+        const auto *item = petTable_->item(row, 0);
+        const auto id = item->data(Qt::UserRole).toULongLong();
+        const auto *p = swarm_.find(id);
+        const auto key = item->data(Qt::UserRole + 1).toString();
+        const bool match = visitors
+            ? key.startsWith("visitor:") && dispatch_->visitors().contains(key.mid(8))
+            : p && !p->primary && !dispatch_->isAway(id);
+        if (match)
+            selection.select(petTable_->model()->index(row, 0),
+                             petTable_->model()->index(row, petTable_->columnCount() - 1));
+    }
+    petTable_->selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect);
+    refreshPets();
+}
+
 void ApplicationController::showPets() {
     if (!petDialog_) {
         petDialog_ = std::make_unique<QDialog>();
@@ -311,6 +342,7 @@ void ApplicationController::showPets() {
         petTable_ = new QTableWidget(0, 6);
         petTable_->setHorizontalHeaderLabels(
             {"编号", "名称", "归属／来源", "动作", "所在设备", "派遣状态"});
+        petTable_->setAutoScroll(false);
         petTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
         petTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         petTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -318,6 +350,16 @@ void ApplicationController::showPets() {
         petTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         petTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
         layout->addWidget(petTable_);
+        auto *selectionButtons = new QHBoxLayout;
+        auto *selectLocal = new QPushButton("全选本机自有子体");
+        selectLocal->setObjectName("selectLocalPets");
+        auto *selectVisitors = new QPushButton("全选访客");
+        selectVisitors->setObjectName("selectVisitorPets");
+        selectionButtons->addWidget(selectLocal);
+        selectionButtons->addWidget(selectVisitors);
+        layout->addLayout(selectionButtons);
+        connect(selectLocal, &QPushButton::clicked, this, [this] { selectPets(false); });
+        connect(selectVisitors, &QPushButton::clicked, this, [this] { selectPets(true); });
         controlPet_ = new QPushButton("开始控制");
         controlStatus_ = new QLabel("单选自己的非主实体后开始控制；WASD／方向键移动。");
         controlStatus_->setTextFormat(Qt::PlainText);
@@ -349,7 +391,13 @@ void ApplicationController::showPets() {
         dispatchPet_ = new QPushButton("派遣…");
         recallPet_ = new QPushButton("召回");
         recallAllPets_ = new QPushButton("全部召回");
-        for (auto *button : {dispatchPet_, recallPet_, recallAllPets_})
+        expelPet_ = new QPushButton("驱赶回原设备");
+        connect(expelPet_, &QPushButton::clicked, this, [this] {
+            dispatch_->expelVisitor(selectedVisitor());
+            reconcileVisitors();
+            refreshPets();
+        });
+        for (auto *button : {dispatchPet_, recallPet_, recallAllPets_, expelPet_})
             dispatchButtons->addWidget(button);
         layout->addLayout(dispatchButtons);
         dispatchStatus_ = new QLabel;
@@ -438,6 +486,8 @@ void ApplicationController::dispatchSelected() {
 void ApplicationController::refreshPets() {
     if (!petTable_)
         return;
+    const int scrollY = petTable_->verticalScrollBar()->value();
+    const int scrollX = petTable_->horizontalScrollBar()->value();
     QSet<QString> selected;
     QString current;
     for (const auto &index : petTable_->selectionModel()->selectedRows())
@@ -479,7 +529,7 @@ void ApplicationController::refreshPets() {
     };
     for (const auto &p : swarm_.pets())
         add({QString::number(p->id), p->displayName(), p->primary ? "主实体" : "自有",
-             p->cosmeticFeeding ? "投喂动画" : states.at(int(p->state)), dispatch_->location(p->id),
+             p->entering() ? "入场中" : p->cosmeticFeeding ? "投喂动画" : states.at(int(p->state)), dispatch_->location(p->id),
              dispatch_->stateText(p->id)},
             p->id, "local:" + QString::number(p->id));
     auto keys = dispatch_->visitors().keys();
@@ -500,9 +550,10 @@ void ApplicationController::refreshPets() {
     controlStatus_->setText(controlledPet_
         ? QString("正在控制：%1 · WASD／方向键移动，松开停止").arg(p->displayName())
         : QStringLiteral("单选自己的非主实体后开始控制；WASD／方向键移动。"));
+    expelPet_->setEnabled(dispatch_->visitors().contains(selectedVisitor()));
     renamePet_->setEnabled(p && !p->primary);
     highlightPet_->setEnabled(p && dispatch_->canControl(id));
-    feedPet_->setEnabled(p && dispatch_->canControl(id) && p->active() && !p->mealActive &&
+    feedPet_->setEnabled(p && dispatch_->canControl(id) && p->active() && !p->entering() && !p->mealActive &&
                          !p->cosmeticFeeding && !p->frontal());
     bool eligible = !selected.isEmpty();
     for (const auto &index : petTable_->selectionModel()->selectedRows()) {
@@ -515,6 +566,8 @@ void ApplicationController::refreshPets() {
     dispatchPet_->setEnabled(eligible);
     recallPet_->setEnabled(p && dispatch_->outgoing().contains(id));
     recallAllPets_->setEnabled(!dispatch_->outgoing().isEmpty());
+    petTable_->verticalScrollBar()->setValue(scrollY);
+    petTable_->horizontalScrollBar()->setValue(scrollX);
 }
 void ApplicationController::reconcileVisitors() {
     for (auto it = visitorWindows_.begin(); it != visitorWindows_.end();) {

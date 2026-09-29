@@ -130,6 +130,8 @@ void DispatchController::finish(quint64 id, bool restore) {
         return;
     const auto o = outgoing_.take(id);
     if (auto *p = swarm_.find(id)) {
+        p->cancelEntry();
+        p->setManualControl(false);
         p->motionGroup.clear();
         p->dispatchPaused = false;
         if (restore && o.phase != Phase::Offering)
@@ -176,6 +178,15 @@ bool DispatchController::highlightPet(quint64 id) {
     return send(
         o.peer, "highlight",
         {{"id", o.id}, {"stream", o.stream}, {"event", QString::number(++highlightSerial_)}});
+}
+bool DispatchController::expelVisitor(const QString &id) {
+    const auto it = visitors_.constFind(id);
+    if (it == visitors_.cend())
+        return false;
+    const auto v = *it;
+    eraseVisitor(id);
+    send(v.peer, "expelled", {{"id", id}});
+    return true;
 }
 void DispatchController::eraseVisitor(const QString &id) {
     if (!visitors_.contains(id))
@@ -348,8 +359,10 @@ void DispatchController::receive(const QString &peer, const QString &session,
                 return;
             }
             auto it = visitors_.find(a[0].toString());
-            if (it == visitors_.end())
+            if (it == visitors_.end()) {
+                send(peer, "gone", {{"id", a[0].toString()}});
                 continue;
+            }
             auto &v = it.value();
             if (v.peer != peer || v.session != session) {
                 invalid();
@@ -441,10 +454,12 @@ void DispatchController::receive(const QString &peer, const QString &session,
         send(peer, "recalled", {{"id", id}});
         return;
     }
-    if (op == "recalled" || op == "reject" || op == "gone") {
+    if (op == "recalled" || op == "reject" || op == "gone" || op == "expelled") {
         if (out != outgoing_.end()) {
             if (op == "recalled" && out->phase != Phase::Recalling)
                 return;
+            if (op == "expelled")
+                emit notice("派遣实体已被对方驱赶，返回本机。");
             if (op == "reject")
                 emit notice("派遣未完成：" + m["reason"].toString().left(160));
             finish(out.key());
@@ -466,7 +481,7 @@ void DispatchController::receive(const QString &peer, const QString &session,
         }
         p->motionGroup = peer;
         p->dispatchPaused = true;
-        p->moveTo(area.center(), area);
+        p->beginEntry(area, int(p->random(0, 4)), p->random(.2, .8));
         out->phase = Phase::Activating;
         out->started = now();
         out->stream = uuid();

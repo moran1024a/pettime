@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(Pettime VERSION 0.2.0 LANGUAGES CXX)
+project(Pettime VERSION 0.3.0 LANGUAGES CXX)
+
+include(cmake/SourceFingerprint.cmake)
+pettime_source_fingerprint("${CMAKE_CURRENT_SOURCE_DIR}" PETTIME_SOURCE_FINGERPRINT)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/SourceFingerprint.h"
+    CONTENT "#pragma once\n#define PETTIME_SOURCE_FINGERPRINT \"${PETTIME_SOURCE_FINGERPRINT}\"\n")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +19,7 @@ add_library(pettime_lib STATIC
     src/SingleInstance.cpp src/ApplicationController.cpp
     src/NetworkService.cpp src/NetworkPanel.cpp src/DispatchController.cpp
 )
-target_include_directories(pettime_lib PUBLIC src)
+target_include_directories(pettime_lib PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(pettime_lib PUBLIC PETTIME_VERSION="${PROJECT_VERSION}")
 target_link_libraries(pettime_lib PUBLIC Qt6::Widgets Qt6::Network)
 if(MSVC)
@@ -32,6 +37,11 @@ install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR
 
 include(CTest)
 if(BUILD_TESTING)
+    add_test(NAME fingerprint_tests COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}/fingerprint-test"
+        "-DTEST_GENERATOR=${CMAKE_GENERATOR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/TestFingerprint.cmake")
     find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
     add_executable(pettime_tests tests/TestPettime.cpp resources.qrc)
     target_link_libraries(pettime_tests PRIVATE pettime_lib Qt6::Test)

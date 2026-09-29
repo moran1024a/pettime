@@ -80,12 +80,20 @@ void PetWindow::highlight() {
 void PetWindow::present() {
     const auto state = model_ ? PetRenderState::from(*model_) : remote_;
     image_ = animation_.render(state, width(), devicePixelRatioF());
-    const QRegion region = inputRegion(image_, size());
+    QRegion region = inputRegion(image_, size());
+    const QPoint topLeft(qRound(state.position.x() - width() * .5),
+                         qRound(state.position.y() - height() * .5));
+    if (!model_)
+        if (const auto *screen = QGuiApplication::primaryScreen()) {
+            region &= QRegion(screen->availableGeometry().translated(-topLeft));
+            if (region.isEmpty())
+                region = QRegion(-2, -2, 1, 1);
+        }
     if (region != mask_) {
         mask_ = region;
         setMask(mask_);
     }
-    move(qRound(state.position.x() - width() * .5), qRound(state.position.y() - height() * .5));
+    move(topLeft);
     if (highlight_) {
         const auto elapsed = highlightClock_.restart();
         if (!frozen_)

@@ -53,7 +53,7 @@ void PetModel::setArea(QRectF bounds) {
     if (bounds.width() <= 0 || bounds.height() <= 0)
         return;
     area = bounds;
-    position = clampPoint(position, area, 36);
+    position = clampPoint(position, area, entering() ? 0 : 36);
     roamGoal_ = clampPoint(roamGoal_, area, 48);
 }
 void PetModel::moveTo(QPointF p, QRectF bounds) {
@@ -91,7 +91,7 @@ QString PetModel::displayName() const {
                                   : customName;
 }
 bool PetModel::playFeeding() {
-    if (!active() || mealActive || cosmeticFeeding || frontal())
+    if (!active() || entering() || mealActive || cosmeticFeeding || frontal())
         return false;
     cosmeticFeeding = true;
     cosmeticAge = 0;
@@ -162,8 +162,31 @@ void PetModel::retire() {
     }
 }
 
+void PetModel::beginEntry(QRectF bounds, int edge, double fraction) {
+    if (primary || !active() || bounds.width() <= 0 || bounds.height() <= 0)
+        return;
+    setManualControl(false);
+    cosmeticFeeding = false;
+    area = bounds;
+    fraction = std::clamp(fraction, .2, .8);
+    const double x = area.left() + area.width() * fraction;
+    const double y = area.top() + area.height() * fraction;
+    const double dx = std::min(100.0, area.width() * .45);
+    const double dy = std::min(100.0, area.height() * .45);
+    switch (edge) {
+    case 0: position = {area.left(), y}; entryVelocity_ = {dx, 0}; break;
+    case 1: position = {area.right(), y}; entryVelocity_ = {-dx, 0}; break;
+    case 2: position = {x, area.top()}; entryVelocity_ = {0, dy}; break;
+    default: position = {x, area.bottom()}; entryVelocity_ = {0, -dy}; break;
+    }
+    entryRemaining_ = 1;
+    heading = desired_ = angle(entryVelocity_);
+    speed = length(entryVelocity_);
+    enter(State::Probe, 1);
+}
+
 bool PetModel::setManualControl(bool enabled) {
-    if (enabled && (primary || !active() || expired || splitReady || dispatchPaused))
+    if (enabled && (primary || entering() || !active() || expired || splitReady || dispatchPaused))
         return false;
     if (manualControl_ == enabled)
         return true;
@@ -246,6 +269,22 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
     }
     if (state == State::Fade) {
         expired = actionAge >= actionDuration;
+        return;
+    }
+    if (!primary && entering()) {
+        const double step = std::min({dt, .1, entryRemaining_});
+        const auto old = position;
+        position = clampPoint(position + entryVelocity_ * step, area, 0);
+        const double distance = length(position - old);
+        traveled += distance;
+        phase = std::fmod(phase + distance / std::max(9.0, 27 * scale), 1);
+        entryRemaining_ = std::max(0.0, entryRemaining_ - step);
+        if (entryRemaining_ < .000001) {
+            entryRemaining_ = 0;
+            setArea(area);
+            nextTurn_ = 0;
+            nextSpecial_ = random(2.3, 4.8);
+        }
         return;
     }
     if (!primary && manualControl_) {

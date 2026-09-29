@@ -23,7 +23,7 @@ bool integer(const QJsonValue &v, double low, double high) {
            v.toDouble() <= high && std::floor(v.toDouble()) == v.toDouble();
 }
 bool envelope(const QJsonObject &o) {
-    return o["protocol"] == "pettime" && integer(o["version"], 1, 1) && o["type"].isString();
+    return o["protocol"] == "pettime" && integer(o["version"], NetworkService::ProtocolVersion, NetworkService::ProtocolVersion) && o["type"].isString();
 }
 bool validInfo(const QJsonObject &o) {
     return validId(o["deviceId"]) && validId(o["sessionId"]) && o["deviceName"].isString() &&
@@ -195,7 +195,7 @@ void NetworkService::discover(bool manual) {
             drop(socket, "网络接口已变化");
     const QString request = uuid();
     requests_.insert(request, now());
-    QJsonObject message{{"protocol", "pettime"},    {"version", 1},          {"type", "discover"},
+    QJsonObject message{{"protocol", "pettime"},    {"version", ProtocolVersion},          {"type", "discover"},
                         {"deviceId", id_},          {"sessionId", session_}, {"requestId", request},
                         {"tcpPort", options_.port}, {"manual", manual}};
     const auto details = discoveryData();
@@ -257,7 +257,7 @@ void NetworkService::receiveDatagrams() {
             if (udpRates_.size() >= 256 && !udpRates_.contains(source))
                 continue;
             udpRates_[source] = now();
-            QJsonObject response{{"protocol", "pettime"},   {"version", 1},
+            QJsonObject response{{"protocol", "pettime"},   {"version", ProtocolVersion},
                                  {"type", "announce"},      {"deviceId", id_},
                                  {"sessionId", session_},   {"requestId", o["requestId"]},
                                  {"tcpPort", options_.port}};
@@ -408,6 +408,7 @@ void NetworkService::attach(QTcpSocket *socket, bool outbound, const QString &id
 QJsonObject NetworkService::discoveryData() const {
     const auto info = snapshot_();
     return {{"appVersion", options_.appVersion},
+            {"fingerprint", options_.fingerprint},
             {"deviceName", QSysInfo::machineHostName().left(128)},
             {"petCount", info.count},
             {"petLimit", info.limit}};
@@ -417,14 +418,23 @@ bool NetworkService::checkVersion(Peer &p, const QJsonObject &o) {
                               ? o["appVersion"].toString()
                               : QString{};
     p.device.protocolVersion = o["version"].toInt();
+    p.device.fingerprint = o["fingerprint"].toString();
+    bool validFingerprint = p.device.fingerprint.size() == 64;
+    for (const auto c : p.device.fingerprint)
+        validFingerprint = validFingerprint && ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+    if (!validFingerprint)
+        p.device.fingerprint.clear();
     p.device.compatible = !p.device.appVersion.isEmpty() &&
                           p.device.appVersion == options_.appVersion &&
-                          p.device.protocolVersion == 1;
+                          p.device.protocolVersion == ProtocolVersion && validFingerprint &&
+                          p.device.fingerprint == options_.fingerprint;
     if (!p.device.compatible) {
         p.device.dispatch = false;
         p.device.state = p.device.appVersion.isEmpty()   ? "版本未知，无法互联"
-                         : p.device.protocolVersion != 1 ? "协议版本不匹配，无法互联"
-                                                         : "版本不匹配，无法互联";
+                         : p.device.protocolVersion != ProtocolVersion ? "协议版本不匹配，无法互联"
+                         : p.device.appVersion != options_.appVersion ? "版本不匹配，无法互联"
+                         : !validFingerprint ? "源码指纹缺失或无效，无法互联"
+                         : "源码指纹不匹配，无法互联";
     }
     return p.device.compatible;
 }
@@ -443,6 +453,7 @@ QJsonObject NetworkService::localData() {
             {"petLimit", info.limit},
             {"revision", revision_},
             {"appVersion", options_.appVersion},
+            {"fingerprint", options_.fingerprint},
             {"capabilities", dispatchEnabled_ ? QJsonArray{"dispatch-v1"} : QJsonArray{}},
             {"dispatched", info.dispatched},
             {"visitors", info.visitors}};
@@ -513,7 +524,7 @@ bool NetworkService::send(QTcpSocket *socket, QJsonObject o) {
     if (!connections_.contains(socket))
         return false;
     o["protocol"] = "pettime";
-    o["version"] = 1;
+    o["version"] = ProtocolVersion;
     const auto body = QJsonDocument(o).toJson(QJsonDocument::Compact);
     if (body.size() > 8192 || socket->bytesToWrite() + body.size() + 4 > 65536) {
         drop(socket, "发送缓冲超限");

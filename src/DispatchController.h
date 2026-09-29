@@ -38,6 +38,7 @@ class DispatchController : public QObject {
     QString dispatchPets(const QList<quint64> &ids, const QString &peer);
     void recallPet(quint64 id);
     void recallAll();
+    bool expelVisitor(const QString &id);
     void removeEntity(quint64 id);
     bool highlightPet(quint64 id);
     bool isAway(quint64 id) const;
