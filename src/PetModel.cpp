@@ -15,6 +15,46 @@ QPointF clampPoint(QPointF p, QRectF area, double margin) {
     return {std::clamp(p.x(), area.left() + mx, area.right() - mx),
             std::clamp(p.y(), area.top() + my, area.bottom() - my)};
 }
+bool validArea(QRectF area) {
+    return std::isfinite(area.x()) && std::isfinite(area.y()) &&
+           std::isfinite(area.width()) && std::isfinite(area.height()) &&
+           area.width() > 0 && area.height() > 0;
+}
+int nearestEdge(QPointF position, QRectF area) {
+    const double distances[] = {std::abs(position.x() - area.left()),
+                                std::abs(position.x() - area.right()),
+                                std::abs(position.y() - area.top()),
+                                std::abs(position.y() - area.bottom())};
+    // Equal distances keep the first edge: left, right, top, then bottom.
+    return int(std::min_element(distances, distances + 4) - distances);
+}
+double edgeFraction(QPointF position, QRectF area, int edge) {
+    return std::clamp(edge < 2 ? (position.y() - area.top()) / area.height()
+                               : (position.x() - area.left()) / area.width(), 0.0, 1.0);
+}
+QPointF edgePoint(QRectF area, int edge, double fraction, double inset) {
+    const double x = area.left() + area.width() * fraction;
+    const double y = area.top() + area.height() * fraction;
+    switch (edge) {
+    case 0: return {area.left() + inset, y};
+    case 1: return {area.right() - inset, y};
+    case 2: return {x, area.top() + inset};
+    default: return {x, area.bottom() - inset};
+    }
+}
+QPointF entryTarget(QRectF area, int edge, double fraction) {
+    const double inset = std::min(100.0, (edge < 2 ? area.width() : area.height()) * .45);
+    return clampPoint(edgePoint(area, edge, fraction, inset), area, 36);
+}
+QPointF exitTarget(QPointF position, QRectF area, int edge) {
+    constexpr double outside = PetWindowExtent * .5 + 2;
+    switch (edge) {
+    case 0: return {area.left() - outside, position.y()};
+    case 1: return {area.right() + outside, position.y()};
+    case 2: return {position.x(), area.top() - outside};
+    default: return {position.x(), area.bottom() + outside};
+    }
+}
 } // namespace
 
 PetModel::PetModel(std::uint32_t seed, QPointF center, QRectF bounds, bool young)
@@ -66,11 +106,28 @@ void PetModel::enter(State next, double duration) {
     actionDuration = duration;
 }
 void PetModel::setArea(QRectF bounds) {
-    if (bounds.width() <= 0 || bounds.height() <= 0)
+    if (!validArea(bounds))
         return;
+    const bool changed = area != bounds;
     area = bounds;
-    position = clampPoint(position, area, entering() ? 0 : 36);
     roamGoal_ = clampPoint(roamGoal_, area, 48);
+    if (!transitioning()) {
+        position = clampPoint(position, area, 36);
+        return;
+    }
+    if (!changed)
+        return; // Off-screen transition coordinates are deliberate.
+    transitionEdge_ = nearestEdge(position, area);
+    transitionFraction_ = edgeFraction(position, area, transitionEdge_);
+    if (entering()) {
+        const double remaining = std::max(.001, transitionDuration_ - transitionElapsed_);
+        startTransition(Transition::Entry,
+                        entryTarget(area, transitionEdge_, transitionFraction_), remaining);
+    } else {
+        const QPointF target = exitTarget(position, area, transitionEdge_);
+        startTransition(Transition::Exit, target,
+                        std::clamp(length(target - position) / 300, 1.0, 3.0));
+    }
 }
 void PetModel::moveTo(QPointF p, QRectF bounds) {
     position = p;
@@ -107,14 +164,16 @@ QString PetModel::displayName() const {
                                   : customName;
 }
 bool PetModel::playFeeding() {
-    if (!active() || dispatchPaused || entering() || mealActive || cosmeticFeeding || frontal())
+    if (!active() || dispatchPaused || dispatchLocked || transitioning() || mealActive ||
+        cosmeticFeeding || frontal())
         return false;
     cosmeticFeeding = true;
     cosmeticAge = 0;
     return true;
 }
 bool PetModel::feed() {
-    if (mealActive || cosmeticFeeding || dispatchPaused || entering() || !active())
+    if (mealActive || cosmeticFeeding || dispatchPaused || dispatchLocked || transitioning() ||
+        !active())
         return false;
     mealActive = true;
     eating = false;
@@ -141,7 +200,7 @@ void PetModel::startFlight(bool front, bool manual) {
     cooldown_ = 3;
 }
 void PetModel::demoPounce() {
-    if (juvenile || cosmeticFeeding || !active())
+    if (juvenile || cosmeticFeeding || dispatchLocked || transitioning() || !active())
         return;
     paused = mealActive = eating = false;
     revealLeft_ = 0;
@@ -149,9 +208,9 @@ void PetModel::demoPounce() {
     speed = std::max(speed, 40.0);
 }
 void PetModel::crush() {
-    cosmeticFeeding = false;
-    if (!active())
+    if (!active() || dispatchLocked || transitioning())
         return;
+    cosmeticFeeding = false;
     paused = dragging = mealActive = eating = crashQueued = manualPounce = false;
     revealLeft_ = 0;
     splitReady = false;
@@ -172,7 +231,10 @@ void PetModel::becomeNymph() {
     nextSpecial_ = random(2.5, 5.5);
 }
 void PetModel::retire() {
+    cancelTransition();
+    setManualControl(false);
     cosmeticFeeding = false;
+    mealActive = eating = false;
     if (active()) {
         enter(State::Fade, .38);
         speed = targetSpeed_ = 0;
@@ -180,30 +242,78 @@ void PetModel::retire() {
 }
 
 void PetModel::beginEntry(QRectF bounds, int edge, double fraction) {
-    if (primary || !active() || bounds.width() <= 0 || bounds.height() <= 0)
+    if (primary || !active() || expired || splitReady || !validArea(bounds) ||
+        !std::isfinite(fraction))
         return;
     setManualControl(false);
-    cosmeticFeeding = false;
+    cosmeticFeeding = mealActive = eating = crashQueued = manualPounce = false;
+    revealLeft_ = 0;
     area = bounds;
-    fraction = std::clamp(fraction, .2, .8);
-    const double x = area.left() + area.width() * fraction;
-    const double y = area.top() + area.height() * fraction;
-    const double dx = std::min(100.0, area.width() * .45);
-    const double dy = std::min(100.0, area.height() * .45);
-    switch (edge) {
-    case 0: position = {area.left(), y}; entryVelocity_ = {dx, 0}; break;
-    case 1: position = {area.right(), y}; entryVelocity_ = {-dx, 0}; break;
-    case 2: position = {x, area.top()}; entryVelocity_ = {0, dy}; break;
-    default: position = {x, area.bottom()}; entryVelocity_ = {0, -dy}; break;
+    transitionEdge_ = std::clamp(edge, 0, 3);
+    transitionFraction_ = std::clamp(fraction, 0.0, 1.0);
+    position = edgePoint(area, transitionEdge_, transitionFraction_, -PetWindowExtent * .5 - 2);
+    roamGoal_ = clampPoint(roamGoal_, area, 48);
+    startTransition(Transition::Entry,
+                    entryTarget(area, transitionEdge_, transitionFraction_), 1);
+}
+bool PetModel::beginExit() {
+    if (primary || !active() || expired || splitReady || exiting() || !validArea(area))
+        return false;
+    setManualControl(false);
+    cosmeticFeeding = mealActive = eating = crashQueued = manualPounce = false;
+    revealLeft_ = 0;
+    transitionEdge_ = nearestEdge(position, area);
+    transitionFraction_ = edgeFraction(position, area, transitionEdge_);
+    const QPointF target = exitTarget(position, area, transitionEdge_);
+    startTransition(Transition::Exit, target,
+                    std::clamp(length(target - position) / 300, 1.0, 3.0));
+    return true;
+}
+void PetModel::startTransition(Transition next, QPointF target, double duration) {
+    transition_ = next;
+    transitionStart_ = position;
+    transitionEnd_ = target;
+    transitionElapsed_ = 0;
+    transitionDuration_ = duration;
+    const QPointF delta = target - position;
+    if (!delta.isNull())
+        heading = desired_ = angle(delta);
+    speed = targetSpeed_ = length(delta) / duration;
+    enter(State::Probe, duration);
+}
+void PetModel::cancelTransition() {
+    if (!transitioning())
+        return;
+    transition_ = Transition::None;
+    transitionElapsed_ = 0;
+    speed = targetSpeed_ = 0;
+    nextTurn_ = 0;
+    nextSpecial_ = random(2.3, 4.8);
+    if (active())
+        enter(State::Probe, 1);
+}
+void PetModel::updateTransition(double dt) {
+    const QPointF old = position;
+    transitionElapsed_ = std::min(transitionDuration_, transitionElapsed_ + dt);
+    if (transitionDuration_ - transitionElapsed_ < 1e-9)
+        transitionElapsed_ = transitionDuration_;
+    position = transitionStart_ +
+               (transitionEnd_ - transitionStart_) * (transitionElapsed_ / transitionDuration_);
+    const double distance = length(position - old);
+    traveled += distance;
+    phase = std::fmod(phase + distance / std::max(9.0, 27 * scale), 1);
+    if (transitionElapsed_ == transitionDuration_) {
+        position = transitionEnd_;
+        if (entering())
+            cancelTransition();
+        else
+            speed = targetSpeed_ = 0; // The controller owns the eventual handoff.
     }
-    entryRemaining_ = 1;
-    heading = desired_ = angle(entryVelocity_);
-    speed = length(entryVelocity_);
-    enter(State::Probe, 1);
 }
 
 bool PetModel::setManualControl(bool enabled) {
-    if (enabled && (primary || entering() || !active() || expired || splitReady || dispatchPaused))
+    if (enabled && (primary || transitioning() || !active() || expired || splitReady ||
+                    dispatchPaused || dispatchLocked))
         return false;
     if (manualControl_ == enabled)
         return true;
@@ -290,20 +400,8 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
         expired = actionAge >= actionDuration;
         return;
     }
-    if (!primary && entering()) {
-        const double step = std::min({dt, .1, entryRemaining_});
-        const auto old = position;
-        position = clampPoint(position + entryVelocity_ * step, area, 0);
-        const double distance = length(position - old);
-        traveled += distance;
-        phase = std::fmod(phase + distance / std::max(9.0, 27 * scale), 1);
-        entryRemaining_ = std::max(0.0, entryRemaining_ - step);
-        if (entryRemaining_ < .000001) {
-            entryRemaining_ = 0;
-            setArea(area);
-            nextTurn_ = 0;
-            nextSpecial_ = random(2.3, 4.8);
-        }
+    if (transitioning()) {
+        updateTransition(dt);
         return;
     }
     if (!primary && manualControl_) {

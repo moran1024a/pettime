@@ -11,8 +11,10 @@
 #include <QSysInfo>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <algorithm>
 #include <cmath>
 #include <memory>
+#include <utility>
 
 using namespace pettime;
 class TestPettime : public QObject {
@@ -404,6 +406,312 @@ class TestPettime : public QObject {
         a.advance(.02, {});
         QVERIFY(std::isfinite(a.position.x()));
         QVERIFY(a.area.contains(a.position));
+    }
+    void exitChoosesNearestEdgeAndStableTies() {
+        const QRectF area(-500, 20, 900, 600);
+        const std::vector<std::pair<QPointF, int>> cases{
+            {{area.left() + 40, area.center().y()}, 0},
+            {{area.right() - 40, area.center().y()}, 1},
+            {{area.center().x(), area.top() + 40}, 2},
+            {{area.center().x(), area.bottom() - 40}, 3},
+            {{area.left() + 40, area.top() + 40}, 0},
+            {{area.right() - 40, area.top() + 40}, 1},
+            {{area.left() + 40, area.bottom() - 40}, 0},
+            {{area.right() - 40, area.bottom() - 40}, 1}};
+        for (const auto &[position, edge] : cases) {
+            PetModel p(7, position, area);
+            p.primary = false;
+            QVERIFY(p.beginExit());
+            QCOMPARE(p.position, position);
+            QCOMPARE(p.transitionEdge(), edge);
+            const double fraction = edge < 2 ? (position.y() - area.top()) / area.height()
+                                              : (position.x() - area.left()) / area.width();
+            QCOMPARE(p.transitionFraction(), fraction);
+            QVERIFY(p.transitioning());
+            QVERIFY(p.exiting());
+            QVERIFY(!p.entering());
+            QVERIFY(!p.exitComplete());
+            QVERIFY(!p.beginExit());
+        }
+        PetModel tied(8, {500, 500}, {0, 0, 1000, 1000});
+        tied.primary = false;
+        QVERIFY(tied.beginExit());
+        QCOMPARE(tied.transitionEdge(), 0);
+    }
+    void edgeEntryStartsOutsideAndEndsSafeAtCorners() {
+        const QRectF area(-500, 20, 900, 600);
+        for (int edge = 0; edge < 4; ++edge)
+            for (double fraction : {0.0, .01, .5, .99, 1.0}) {
+                PetModel p(7, area.center(), area);
+                p.primary = false;
+                p.beginEntry(area, edge, fraction);
+                QVERIFY(p.entering());
+                QCOMPARE(p.transitionEdge(), edge);
+                QCOMPARE(p.transitionFraction(), fraction);
+                const QRectF window(p.position - QPointF(PetWindowExtent / 2, PetWindowExtent / 2),
+                                    QSizeF(PetWindowExtent, PetWindowExtent));
+                QVERIFY(!window.intersects(area));
+                const auto start = p.position;
+                p.setArea(area);
+                QCOMPARE(p.position, start);
+                for (double dt : {.2, .05, .3})
+                    p.advance(dt, {});
+                QVERIFY(p.entering());
+                p.advance(.45, {});
+                QVERIFY(!p.transitioning());
+                QVERIFY(area.adjusted(35, 35, -35, -35).contains(p.position));
+                QVERIFY(p.traveled >= PetWindowExtent / 2 + 2 + 99);
+                QVERIFY(p.setManualControl(true));
+            }
+        PetModel small(7, {10, 10}, {0, 0, 20, 20});
+        small.primary = false;
+        small.beginEntry(small.area, 0, 0);
+        small.advance(1, {});
+        QVERIFY(small.area.contains(small.position));
+        QVERIFY(std::isfinite(small.position.x()) && std::isfinite(small.position.y()));
+    }
+    void edgeExitEndsFullyOutsideAndWaitsForHandoff() {
+        const QRectF area(-500, 20, 900, 600);
+        const std::vector<QPointF> starts{{area.left() + 60, area.center().y()},
+                                         {area.right() - 60, area.center().y()},
+                                         {area.center().x(), area.top() + 60},
+                                         {area.center().x(), area.bottom() - 60}};
+        for (int edge = 0; edge < 4; ++edge) {
+            PetModel p(7, starts[edge], area);
+            p.primary = false;
+            QVERIFY(p.beginExit());
+            QCOMPARE(p.transitionEdge(), edge);
+            QCOMPARE(p.actionDuration, 1.0);
+            p.advance(.6, {});
+            QVERIFY(!p.exitComplete());
+            p.advance(.4, {});
+            QVERIFY(p.exitComplete());
+            QVERIFY(p.transitioning());
+            QVERIFY(p.exiting());
+            const QRectF window(p.position - QPointF(PetWindowExtent / 2, PetWindowExtent / 2),
+                                QSizeF(PetWindowExtent, PetWindowExtent));
+            QVERIFY(!window.intersects(area));
+            QVERIFY(std::abs(p.traveled - (60 + PetWindowExtent / 2 + 2)) < 1e-9);
+            QCOMPARE(p.speed, 0.0);
+            const auto endpoint = p.position;
+            const auto phase = p.phase;
+            p.advance(10, {});
+            QCOMPARE(p.position, endpoint);
+            QCOMPARE(p.phase, phase);
+            QVERIFY(!p.feed());
+            QVERIFY(!p.playFeeding());
+            QVERIFY(!p.setManualControl(true));
+            p.crush();
+            QVERIFY(p.active());
+            QVERIFY(p.exitComplete());
+        }
+    }
+    void edgeTransitionsConsumeVariableDtAndTrackActualDistance() {
+        const QRectF area(0, 0, 1000, 1000);
+        PetModel delayed(7, area.center(), area);
+        delayed.primary = false;
+        delayed.beginEntry(area, 0, .5);
+        PetModel frequent = delayed;
+        const auto start = delayed.position;
+        delayed.advance(.2, {});
+        QVERIFY(std::abs(delayed.position.x() - start.x() - 42.8) < 1e-9);
+        for (int i = 0; i < 4; ++i)
+            frequent.advance(.05, {});
+        QVERIFY(std::hypot((delayed.position - frequent.position).x(),
+                           (delayed.position - frequent.position).y()) < 1e-9);
+        delayed.advance(.3, {});
+        delayed.advance(.5, {});
+        for (int i = 0; i < 8; ++i)
+            frequent.advance(.1, {});
+        QVERIFY(!delayed.entering());
+        QVERIFY(!frequent.entering());
+        QCOMPARE(delayed.position, frequent.position);
+        QVERIFY(std::abs(delayed.traveled - frequent.traveled) < 1e-9);
+        QVERIFY(std::abs(std::remainder(delayed.phase - frequent.phase, 1)) < 1e-9);
+        for (double side : {1000.0, 3000.0}) {
+            PetModel p(7, {side / 2, side / 2}, {0, 0, side, side});
+            p.primary = false;
+            QVERIFY(p.beginExit());
+            const double duration = std::clamp((side / 2 + PetWindowExtent / 2 + 2) / 300,
+                                               1.0, 3.0);
+            QCOMPARE(p.actionDuration, duration);
+            PetModel q = p;
+            p.advance(duration * .4, {});
+            for (int i = 0; i < 6; ++i)
+                q.advance(duration * .4 / 6, {});
+            QVERIFY(std::abs(p.position.x() - q.position.x()) < 1e-9);
+            QVERIFY(!p.exitComplete());
+            p.advance(duration * .6 + .2, {});
+            q.advance(duration * .6, {});
+            QVERIFY(p.exitComplete());
+            QVERIFY(q.exitComplete());
+            QCOMPARE(p.position, q.position);
+            QVERIFY(std::abs(p.traveled - q.traveled) < 1e-9);
+            QVERIFY(std::abs(std::remainder(p.phase - q.phase, 1)) < 1e-9);
+        }
+    }
+    void entryCanReverseToExitWithoutJumpingOrCrossingScreen() {
+        const QRectF area(0, 0, 1000, 1000);
+        for (int edge = 0; edge < 4; ++edge) {
+            PetModel p(7, area.center(), area);
+            p.primary = false;
+            p.beginEntry(area, edge, .5);
+            p.advance(.2, {});
+            const auto before = p.position;
+            QVERIFY(p.beginExit());
+            QCOMPARE(p.position, before);
+            QCOMPARE(p.transitionEdge(), edge);
+            QVERIFY(!p.entering());
+            p.advance(1, {});
+            QVERIFY(p.exitComplete());
+            QVERIFY(std::hypot((p.position - before).x(), (p.position - before).y()) < 43);
+            p.beginEntry(area, edge, .5);
+            QVERIFY(p.entering());
+            QVERIFY(!p.exiting());
+        }
+        PetModel corner(7, area.center(), area);
+        corner.primary = false;
+        corner.beginEntry(area, 0, 0);
+        const auto outsideCorner = corner.position;
+        QVERIFY(corner.beginExit());
+        QCOMPARE(corner.position, outsideCorner);
+        QCOMPARE(corner.transitionEdge(), 2); // Distance to the top edge line is zero.
+        corner.advance(1, {});
+        QVERIFY(corner.exitComplete());
+        QCOMPARE(corner.position.x(), outsideCorner.x());
+    }
+    void transitionLocksActionsCancelsFeedingAndAllowsRetirement() {
+        for (bool cosmetic : {false, true}) {
+            PetModel p(7, {500, 500}, {0, 0, 1000, 1000}, true);
+            p.primary = false;
+            QVERIFY(p.setManualControl(true));
+            QVERIFY(cosmetic ? p.playFeeding() : p.feed());
+            p.advance(.2, {});
+            p.dispatchLocked = true;
+            QVERIFY(p.beginExit());
+            QVERIFY(!p.manuallyControlled());
+            QVERIFY(!p.cosmeticFeeding);
+            QVERIFY(!p.mealActive);
+            QVERIFY(!p.eating);
+            QVERIFY(!p.feed());
+            QVERIFY(!p.playFeeding());
+            QVERIFY(!p.setManualControl(true));
+            p.crush();
+            QCOMPARE(p.state, State::Probe);
+            p.advance(3, {});
+            QVERIFY(p.exitComplete());
+            QVERIFY(std::abs(p.growth() - p.age * 100 / 360) < 1e-9);
+            QCOMPARE(p.affection, 0);
+            p.cancelTransition();
+            QVERIFY(!p.transitioning());
+            QVERIFY(p.dispatchLocked);
+            QVERIFY(!p.feed());
+            QVERIFY(!p.playFeeding());
+            QVERIFY(!p.setManualControl(true));
+            p.crush();
+            QCOMPARE(p.state, State::Probe);
+            p.dispatchLocked = false;
+            p.beginEntry(p.area, 0, .5);
+            QVERIFY(p.entering());
+            p.cancelEntry();
+            QVERIFY(!p.transitioning());
+            QVERIFY(p.setManualControl(true));
+            QVERIFY(p.playFeeding());
+            p.dispatchLocked = true;
+            p.beginEntry(p.area, 0, .5);
+            QVERIFY(!p.cosmeticFeeding);
+            p.retire();
+            QVERIFY(!p.transitioning());
+            QCOMPARE(p.state, State::Fade);
+            p.advance(.4, {});
+            QVERIFY(p.expired);
+        }
+        PetModel rejected(7, {500, 500}, {0, 0, 1000, 1000});
+        QVERIFY(!rejected.beginExit());
+        rejected.primary = false;
+        rejected.expired = true;
+        QVERIFY(!rejected.beginExit());
+        rejected.expired = false;
+        rejected.splitReady = true;
+        QVERIFY(!rejected.beginExit());
+        rejected.splitReady = false;
+        rejected.retire();
+        QVERIFY(!rejected.beginExit());
+    }
+    void transitionScreenChangesReplanWithoutTeleporting() {
+        const QRectF area(-500, 20, 900, 600);
+        PetModel entry(7, area.center(), area);
+        entry.primary = false;
+        entry.beginEntry(area, 0, .5);
+        entry.advance(.2, {});
+        const auto entryPosition = entry.position;
+        entry.setArea(area);
+        QCOMPARE(entry.position, entryPosition);
+        const QRectF shifted(-600, 20, 900, 600);
+        entry.setArea(shifted);
+        QCOMPARE(entry.position, entryPosition);
+        QCOMPARE(entry.transitionEdge(), 0);
+        entry.advance(.8, {});
+        QVERIFY(!entry.entering());
+        QVERIFY(shifted.adjusted(35, 35, -35, -35).contains(entry.position));
+        PetModel exit(7, {area.left() + 40, area.center().y()}, area);
+        exit.primary = false;
+        QVERIFY(exit.beginExit());
+        exit.advance(.2, {});
+        const auto exitPosition = exit.position;
+        exit.setArea(area);
+        QCOMPARE(exit.position, exitPosition);
+        const QRectF replacement(-1200, 20, 600, 600);
+        exit.setArea(replacement);
+        QCOMPARE(exit.position, exitPosition);
+        QCOMPARE(exit.transitionEdge(), 1);
+        exit.advance(1, {});
+        QVERIFY(exit.exitComplete());
+        const auto endpoint = exit.position;
+        exit.setArea(replacement);
+        QCOMPARE(exit.position, endpoint);
+        QVERIFY(exit.exitComplete());
+        const QRectF expanded(-1200, 20, 1200, 600);
+        QVERIFY(expanded.contains(endpoint));
+        exit.setArea(expanded);
+        QCOMPARE(exit.position, endpoint);
+        QVERIFY(!exit.exitComplete());
+        exit.advance(3, {});
+        QVERIFY(exit.exitComplete());
+        const QRectF window(exit.position - QPointF(PetWindowExtent / 2, PetWindowExtent / 2),
+                            QSizeF(PetWindowExtent, PetWindowExtent));
+        QVERIFY(!window.intersects(expanded));
+    }
+    void transitionGrowthUsesActiveTimeAndDispatchFreeze() {
+        SwarmController swarm(8);
+        swarm.spawn({400, 400}, {0, 0, 1000, 1000}, 1, 1);
+        auto *p = swarm.find(2);
+        QVERIFY(p);
+        p->beginEntry(p->area, 0, .5);
+        const auto start = p->position;
+        p->dispatchPaused = true;
+        swarm.advance(20);
+        QCOMPARE(p->position, start);
+        QCOMPARE(p->age, 0.0);
+        QCOMPARE(p->growth(), 0.0);
+        QVERIFY(p->entering());
+        p->dispatchPaused = false;
+        swarm.advance(.2);
+        const auto beforeExit = p->position;
+        QVERIFY(p->beginExit());
+        p->dispatchLocked = true;
+        p->dispatchPaused = true;
+        swarm.advance(20);
+        QCOMPARE(p->position, beforeExit);
+        QVERIFY(!p->exitComplete());
+        QCOMPARE(p->age, .2);
+        p->dispatchPaused = false;
+        swarm.advance(1);
+        QVERIFY(p->exitComplete());
+        QVERIFY(std::abs(p->growth() - 1.2 * 100 / 360) < 1e-9);
+        const auto grown = p->growth();
+        swarm.advance(.2);
+        QVERIFY(std::abs(p->growth() - grown - .2 * 100 / 360) < 1e-9);
     }
     void animationFrames() {
         QCOMPARE(animation_->walk.size(), std::size_t(72));

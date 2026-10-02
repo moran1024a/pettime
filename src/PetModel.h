@@ -11,6 +11,7 @@ namespace pettime {
 constexpr double Pi = 3.14159265358979323846;
 constexpr double AdultScale = .75;
 constexpr double MinimumScale = .24;
+constexpr int PetWindowExtent = 224;
 enum class State {
     Rest,
     Probe,
@@ -33,8 +34,17 @@ class PetModel {
     void advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors = {});
     bool feed();
     void beginEntry(QRectF bounds, int edge, double fraction);
-    void cancelEntry() { entryRemaining_ = 0; }
-    bool entering() const { return entryRemaining_ > 0; }
+    bool beginExit();
+    void cancelTransition();
+    void cancelEntry() { cancelTransition(); }
+    bool entering() const { return transition_ == Transition::Entry; }
+    bool transitioning() const { return transition_ != Transition::None; }
+    bool exiting() const { return transition_ == Transition::Exit; }
+    bool exitComplete() const {
+        return exiting() && transitionElapsed_ >= transitionDuration_;
+    }
+    int transitionEdge() const { return transitionEdge_; }
+    double transitionFraction() const { return transitionFraction_; }
     bool setManualControl(bool enabled);
     void setManualDirection(QPointF direction);
     bool manuallyControlled() const { return manualControl_; }
@@ -44,6 +54,7 @@ class PetModel {
     QString customName;
     QString motionGroup; // Empty means the local desktop.
     bool dispatchPaused = false;
+    bool dispatchLocked = false;
     bool cosmeticFeeding = false;
     double cosmeticAge = 0;
     void demoPounce();
@@ -81,8 +92,14 @@ class PetModel {
     double growth_ = 100;
     void addGrowth(double amount);
     void feedingGrowth();
-    double entryRemaining_ = 0;
-    QPointF entryVelocity_;
+    enum class Transition { None, Entry, Exit };
+    Transition transition_ = Transition::None;
+    int transitionEdge_ = 0;
+    double transitionFraction_ = .5;
+    double transitionElapsed_ = 0, transitionDuration_ = 1;
+    QPointF transitionStart_, transitionEnd_;
+    void startTransition(Transition next, QPointF target, double duration);
+    void updateTransition(double dt);
     bool manualControl_ = false;
     QPointF manualDirection_;
     void updateManual(double dt);

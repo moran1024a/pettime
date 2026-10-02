@@ -30,12 +30,15 @@ int main(int argc, char **argv) {
     std::unique_ptr<DispatchController> dispatch;
     NetworkService network(SettingsStore(parser.value("data-dir")), [&] {
         return NetworkService::Info{swarm.totalCount(), swarm.limit(),
-                                    dispatch ? int(dispatch->outgoing().size()) : 0,
+                                    dispatch ? dispatch->awayCount() : 0,
                                     dispatch ? int(dispatch->visitors().size()) : 0};
     });
     dispatch = std::make_unique<DispatchController>(network, swarm, area);
     swarm.beforeRemove = [&](quint64 id) { dispatch->removeEntity(id); };
     std::map<QString, std::unique_ptr<PetWindow>> windows;
+    dispatch->hideVisitor = [&](const QString &id) {
+        if (auto it = windows.find(id); it != windows.end()) it->second->hidePet();
+    };
     quint64 command = 0;
     int highlights = 0;
     QString result;
@@ -98,7 +101,7 @@ int main(int argc, char **argv) {
                 else if (op == "disconnect")
                     network.disconnectPeer(o["peer"].toString());
                 else if (op == "stop")
-                    network.stop();
+                    dispatch->requestStop();
                 else if (op == "start")
                     network.start();
                 else if (op == "quit")
@@ -116,7 +119,7 @@ int main(int argc, char **argv) {
                 ++it;
         }
         for (auto it = dispatch->visitors().cbegin(); it != dispatch->visitors().cend(); ++it) {
-            if (!it->active)
+            if (!it->active || it->hidden)
                 continue;
             auto &w = windows[it.key()];
             if (!w)

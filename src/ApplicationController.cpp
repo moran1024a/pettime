@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -78,20 +79,34 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     };
     network_ = std::make_unique<NetworkService>(store_, [this] {
         return NetworkService::Info{swarm_.totalCount(), swarm_.limit(),
-                                    dispatch_ ? int(dispatch_->outgoing().size()) : 0,
+                                    dispatch_ ? dispatch_->awayCount() : 0,
                                     dispatch_ ? int(dispatch_->visitors().size()) : 0};
     });
     dispatch_ = std::make_unique<DispatchController>(*network_, swarm_, [] {
         auto *screen = QGuiApplication::primaryScreen();
         return screen ? QRectF(screen->availableGeometry()) : QRectF{};
     });
+    dispatch_->localSurface = [](QPointF position) { return areaAt(position); };
+    dispatch_->hideLocal = [this](quint64 id) {
+        if (id == primary_.id)
+            mainWindow_.hidePet();
+        else if (const auto it = windows_.find(id); it != windows_.end())
+            it->second->hidePet();
+    };
+    dispatch_->hideVisitor = [this](const QString &id) {
+        if (const auto it = visitorWindows_.find(id); it != visitorWindows_.end())
+            it->second->hidePet();
+    };
     connect(dispatch_.get(), &DispatchController::changed, this, [this] {
         validateControl();
+        if (networkPanel_)
+            networkPanel_->setClosing(dispatch_->stoppingService());
         // Defer reconciliation: a removal callback may still be traversing the swarm.
         QTimer::singleShot(0, this, [this] {
             reconcileWindows();
             reconcileVisitors();
-            refreshPets();
+            if (petDialog_ && petDialog_->isVisible())
+                refreshPets();
         });
     });
     connect(dispatch_.get(), &DispatchController::notice, this, [this](const QString &text) {
@@ -142,8 +157,12 @@ ApplicationController::~ApplicationController() {
     tray_.hide();
 }
 void ApplicationController::showNetwork() {
-    if (!networkPanel_)
+    if (!networkPanel_) {
         networkPanel_ = std::make_unique<NetworkPanel>(*network_);
+        connect(networkPanel_.get(), &NetworkPanel::stopRequested, dispatch_.get(),
+                &DispatchController::requestStop);
+    }
+    networkPanel_->setClosing(dispatch_->stoppingService());
     networkPanel_->show();
     networkPanel_->raise();
     networkPanel_->activateWindow();
@@ -269,8 +288,20 @@ QString ApplicationController::selectedVisitor() const {
 }
 bool ApplicationController::canStartControl(quint64 id) const {
     const auto *p = swarm_.find(id);
-    return p && !p->primary && !p->entering() && p->active() && !p->expired && !p->splitReady &&
-           !p->dispatchPaused && dispatch_->canControl(id);
+    return p && !p->primary && !p->transitioning() && !p->dispatchLocked && p->active() &&
+           !p->expired && !p->splitReady && !p->dispatchPaused && dispatch_->canControl(id);
+}
+bool ApplicationController::canFeedPet(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    return p && dispatch_->canControl(id) && p->active() && !p->transitioning() &&
+           !p->dispatchLocked && !p->dispatchPaused && !p->expired && !p->splitReady &&
+           !p->mealActive && !p->cosmeticFeeding && !p->frontal();
+}
+bool ApplicationController::canDispatchPet(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    return p && !p->primary && p->active() && !p->transitioning() && !p->dispatchLocked &&
+           !p->dispatchPaused && !p->expired && !p->splitReady && p->motionGroup.isEmpty() &&
+           !dispatch_->outgoing().contains(id) && !dispatch_->stoppingService();
 }
 void ApplicationController::clearControlKeys() {
     controlKeys_.clear();
@@ -336,6 +367,7 @@ bool ApplicationController::eventFilter(QObject *object, QEvent *event) {
 bool ApplicationController::canClearPet(quint64 id) const {
     const auto *p = swarm_.find(id);
     return p && !p->primary && p->motionGroup.isEmpty() && !p->dispatchPaused &&
+           !p->transitioning() && !p->dispatchLocked &&
            !dispatch_->outgoing().contains(id);
 }
 bool ApplicationController::clearPet(quint64 id) {
@@ -450,7 +482,7 @@ void ApplicationController::showPets() {
                 [this] { dispatch_->recallPet(selectedPet()); });
         connect(recallAllPets_, &QPushButton::clicked, dispatch_.get(),
                 &DispatchController::recallAll);
-        layout->addWidget(new QLabel("此处投喂完成后仅为所选实体随机增加 1～5 点成长，不增加好感度。名称仅在本次运行保留。"));
+        layout->addWidget(new QLabel("此处投喂完成后仅为所选实体随机增加 1～5 点成长，不增加好感度。名称会随进度保存，下次启动恢复。"));
         connect(petTable_, &QTableWidget::itemSelectionChanged, this,
                 &ApplicationController::refreshPets);
         connect(renamePet_, &QPushButton::clicked, this, [this] {
@@ -469,6 +501,9 @@ void ApplicationController::showPets() {
         });
         connect(highlightPet_, &QPushButton::clicked, this, [this] {
             const auto id = selectedPet();
+            const auto *p = swarm_.find(id);
+            if (!p || !dispatch_->canHighlight(id))
+                return;
             if (dispatch_->isAway(id))
                 dispatch_->highlightPet(id);
             else if (id == 1)
@@ -477,9 +512,9 @@ void ApplicationController::showPets() {
                 it->second->highlight();
         });
         connect(feedPet_, &QPushButton::clicked, this, [this] {
-            if (dispatch_->canControl(selectedPet()))
-                if (auto *p = swarm_.find(selectedPet()))
-                    p->playFeeding();
+            const auto id = selectedPet();
+            if (canFeedPet(id))
+                swarm_.find(id)->playFeeding();
             refreshPets();
         });
     }
@@ -497,9 +532,11 @@ void ApplicationController::dispatchSelected() {
     QList<quint64> ids;
     for (const auto &index : petTable_->selectionModel()->selectedRows()) {
         const auto id = petTable_->item(index.row(), 0)->data(Qt::UserRole).toULongLong();
-        if (id)
+        if (canDispatchPet(id))
             ids.append(id);
     }
+    if (ids.isEmpty())
+        return;
     QStringList choices, peers;
     for (const auto &d : network_->devices()) {
         if (!network_->dispatchReady(d.id))
@@ -538,49 +575,70 @@ void ApplicationController::refreshPets() {
     petCount_->setText(QString("自有 %1 / %2 · 派出 %3 · 访客 %4 / %5")
                            .arg(swarm_.totalCount())
                            .arg(swarm_.limit())
-                           .arg(dispatch_->outgoing().size())
+                           .arg(dispatch_->awayCount())
                            .arg(dispatch_->visitors().size())
                            .arg(DispatchController::VisitorLimit));
-    petTable_->setRowCount(swarm_.totalCount() + dispatch_->visitors().size());
-    petTable_->clearSelection();
-    petTable_->setCurrentCell(-1, -1);
-    int row = 0;
+    QStringList keys;
+    for (const auto &p : swarm_.pets())
+        keys.append("local:" + QString::number(p->id));
+    auto visitors = dispatch_->visitors().keys();
+    std::sort(visitors.begin(), visitors.end());
+    for (const auto &key : visitors)
+        keys.append("visitor:" + key);
+    QHash<QString, int> rows;
+    for (int row = 0; row < petTable_->rowCount(); ++row)
+        if (const auto *item = petTable_->item(row, 0))
+            rows.insert(item->data(Qt::UserRole + 1).toString(), row);
+    const bool samePets = rows.size() == keys.size() &&
+        std::all_of(keys.cbegin(), keys.cend(), [&](const auto &key) { return rows.contains(key); });
+    if (!samePets) {
+        petTable_->setRowCount(keys.size());
+        petTable_->clearSelection();
+        petTable_->setCurrentCell(-1, -1);
+    }
+    int nextRow = 0;
     const QStringList states{"休息", "爬行", "疾走", "躲避", "进食", "开心",
                              "起飞", "飞行", "俯冲", "回弹", "踩扁", "退场"};
     auto add = [&](const QStringList &values, quint64 id, const QString &key) {
+        const int row = samePets ? rows.value(key) : nextRow;
+        ++nextRow;
         for (int col = 0; col < values.size(); ++col) {
             auto *item = petTable_->item(row, col);
             if (!item) {
                 item = new QTableWidgetItem;
                 petTable_->setItem(row, col, item);
             }
-            item->setText(values[col]);
-            item->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(id));
-            item->setData(Qt::UserRole + 1, key);
+            if (item->text() != values[col])
+                item->setText(values[col]);
+            const auto value = QVariant::fromValue<qulonglong>(id);
+            if (item->data(Qt::UserRole) != value)
+                item->setData(Qt::UserRole, value);
+            if (item->data(Qt::UserRole + 1).toString() != key)
+                item->setData(Qt::UserRole + 1, key);
         }
-        if (selected.contains(key))
+        if (!samePets && selected.contains(key))
             petTable_->selectionModel()->select(petTable_->model()->index(row, 0),
                                                 QItemSelectionModel::Select |
                                                     QItemSelectionModel::Rows);
-        if (key == current)
+        if (!samePets && key == current)
             petTable_->selectionModel()->setCurrentIndex(petTable_->model()->index(row, 0),
                                                          QItemSelectionModel::NoUpdate);
-        ++row;
     };
-    for (const auto &p : swarm_.pets())
+    for (const auto &p : swarm_.pets()) {
+        const QString action = p->exiting() ? "离场中" : p->entering() ? "入场中"
+            : p->dispatchLocked ? "交接中" : p->cosmeticFeeding ? "投喂动画"
+                                                                      : states.at(int(p->state));
         add({QString::number(p->id), p->displayName(), p->primary ? "主实体" : "自有",
-             p->entering() ? "入场中" : p->cosmeticFeeding ? "投喂动画" : states.at(int(p->state)), dispatch_->location(p->id),
+             action, dispatch_->location(p->id),
              dispatch_->stateText(p->id), QString::number(std::floor(p->growth() * 10) / 10, 'f', 1) + "%",
              PetModel::growthState(p->growth())},
             p->id, "local:" + QString::number(p->id));
-    auto keys = dispatch_->visitors().keys();
-    std::sort(keys.begin(), keys.end());
-    for (const auto &key : keys) {
+    }
+    for (const auto &key : visitors) {
         const auto &v = dispatch_->visitors()[key];
-        add({v.entity, v.name, "访客 · " + v.sourceName, states.at(int(v.current.state)), "本机",
-             !v.active  ? "预留中"
-             : v.frozen ? "等待重连"
-                        : "只读访客",
+        add({v.entity, v.name, "访客 · " + v.sourceName,
+             v.hidden ? "交接中" : v.stage == 1 ? "离场中" : states.at(int(v.current.state)), "本机",
+             dispatch_->visitorStateText(v),
              QString::number(std::floor(v.current.growth * 10) / 10, 'f', 1) + "%",
              PetModel::growthState(v.current.growth)},
             0, "visitor:" + key);
@@ -596,15 +654,12 @@ void ApplicationController::refreshPets() {
     clearPet_->setEnabled(canClearPet(id));
     expelPet_->setEnabled(dispatch_->visitors().contains(selectedVisitor()));
     renamePet_->setEnabled(p && !p->primary);
-    highlightPet_->setEnabled(p && dispatch_->canControl(id));
-    feedPet_->setEnabled(p && dispatch_->canControl(id) && p->active() && !p->entering() && !p->mealActive &&
-                         !p->cosmeticFeeding && !p->frontal());
-    bool eligible = !selected.isEmpty();
+    highlightPet_->setEnabled(p && dispatch_->canHighlight(id));
+    feedPet_->setEnabled(canFeedPet(id));
+    bool eligible = !petTable_->selectionModel()->selectedRows().isEmpty();
     for (const auto &index : petTable_->selectionModel()->selectedRows()) {
         const auto n = petTable_->item(index.row(), 0)->data(Qt::UserRole).toULongLong();
-        const auto *candidate = swarm_.find(n);
-        if (!candidate || candidate->primary || !candidate->active() ||
-            dispatch_->outgoing().contains(n))
+        if (!canDispatchPet(n))
             eligible = false;
     }
     dispatchPet_->setEnabled(eligible);
@@ -615,14 +670,15 @@ void ApplicationController::refreshPets() {
 }
 void ApplicationController::reconcileVisitors() {
     for (auto it = visitorWindows_.begin(); it != visitorWindows_.end();) {
-        if (!dispatch_->visitors().contains(it->first) || !dispatch_->visitors()[it->first].active)
+        if (!dispatch_->visitors().contains(it->first) || !dispatch_->visitors()[it->first].active ||
+            dispatch_->visitors()[it->first].hidden)
             it = visitorWindows_.erase(it);
         else
             ++it;
     }
     for (auto it = dispatch_->visitors().cbegin(); it != dispatch_->visitors().cend(); ++it) {
         const auto &v = it.value();
-        if (!v.active)
+        if (!v.active || v.hidden)
             continue;
         auto &window = visitorWindows_[it.key()];
         if (!window)
@@ -676,9 +732,19 @@ void ApplicationController::persist() {
     QString error;
     const QJsonObject config{{"formatVersion", 1}, {"populationLimit", swarm_.limit()},
         {"paused", primary_.paused}, {"pace", primary_.pace},
-        {"networkEnabled", network_->running()}};
+        {"networkEnabled", network_->running() && !dispatch_->stoppingService()}};
+    auto progress = swarm_.saveProgress();
+    auto pets = progress.value("pets").toArray();
+    for (int index = 0; index < pets.size(); ++index) {
+        auto pet = pets[index].toObject();
+        const auto position = dispatch_->savedPosition(pet.value("id").toString().toULongLong());
+        pet["x"] = position.x();
+        pet["y"] = position.y();
+        pets[index] = pet;
+    }
+    progress["pets"] = pets;
     // Each file is replaced atomically; progress contains its own complete entity table.
-    if (store_.saveJson("progress.json", swarm_.saveProgress(), &error) &&
+    if (store_.saveJson("progress.json", progress, &error) &&
         store_.saveJson("config.json", config, &error)) {
         dirty_ = saveWarning_ = false;
     } else {
@@ -692,15 +758,24 @@ void ApplicationController::persist() {
     refreshMenu();
 }
 void ApplicationController::updateScreens() {
-    primary_.setArea(areaAt(primary_.position));
-    for (const auto &p : swarm_.pets())
-        if (!dispatch_->isAway(p->id))
-            p->setArea(areaAt(p->position));
+    const auto screens = QGuiApplication::screens();
+    for (const auto &p : swarm_.pets()) {
+        if (dispatch_->isLocalVisible(p->id)) {
+            const bool existingArea = std::any_of(screens.cbegin(), screens.cend(),
+                [&](const auto *screen) { return QRectF(screen->availableGeometry()) == p->area; });
+            if (!p->transitioning())
+                p->setArea(areaAt(p->position));
+            else if (!existingArea)
+                p->setArea(areaAt(p->area.center()));
+        }
+        if (dispatch_->outgoing().contains(p->id))
+            dispatch_->updateLocalSurface(p->id, areaAt(dispatch_->savedPosition(p->id)));
+    }
 }
 void ApplicationController::reconcileWindows() {
     std::set<std::uint64_t> alive;
     for (const auto &p : swarm_.pets())
-        if (!dispatch_->isAway(p->id))
+        if (!p->expired && dispatch_->isLocalVisible(p->id))
             alive.insert(p->id);
     for (auto it = windows_.begin(); it != windows_.end();) {
         if (!alive.count(it->first))
@@ -709,10 +784,11 @@ void ApplicationController::reconcileWindows() {
             ++it;
     }
     for (const auto &p : swarm_.pets()) {
-        if (p->primary || dispatch_->isAway(p->id))
+        if (p->primary || p->expired || !dispatch_->isLocalVisible(p->id))
             continue;
         if (!windows_.count(p->id)) {
-            p->setArea(areaAt(p->position));
+            if (!p->transitioning())
+                p->setArea(areaAt(p->position));
             auto window = std::make_unique<PetWindow>(*p, animation_);
             connect(window.get(), &PetWindow::contextRequested, this,
                     [this, id = p->id](QPoint point) {
@@ -738,7 +814,7 @@ void ApplicationController::tick() {
     if (now >= nextVisitors_) {
         reconcileVisitors();
         const int visibleCount = int(dispatch_->visitors().size()) + swarm_.totalCount() -
-                                 int(dispatch_->outgoing().size());
+                                 dispatch_->awayCount();
         nextVisitors_ = now + (visibleCount >= 48 ? .066 : visibleCount >= 24 ? .05 : .033);
     }
     const int before = primary_.affection;
@@ -775,7 +851,7 @@ void ApplicationController::tick() {
             pair.second->present();
     }
     mainWindow_.present();
-    if (ticks_ % 15 == 0)
+    if (ticks_ % 15 == 0 && petDialog_ && petDialog_->isVisible())
         refreshPets();
     ++ticks_;
     const double workMs = work.nsecsElapsed() / 1e6;

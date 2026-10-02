@@ -10,6 +10,10 @@ class NetworkPanel : public QDialog {
     Q_OBJECT
   public:
     explicit NetworkPanel(NetworkService &service, QWidget *parent = nullptr);
+    void setClosing(bool closing);
+
+  signals:
+    void stopRequested();
 
   protected:
     void showEvent(QShowEvent *event) override;
@@ -21,5 +25,6 @@ class NetworkPanel : public QDialog {
     QLabel *status_, *local_, *count_;
     QPushButton *refresh_;
     QTableWidget *table_;
+    bool closing_ = false;
 };
 } // namespace pettime

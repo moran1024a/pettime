@@ -1,9 +1,12 @@
 #include "NetworkPanel.h"
 #include <QHeaderView>
+#include <QHash>
+#include <QMetaMethod>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSysInfo>
 #include <QVBoxLayout>
+#include <algorithm>
 namespace pettime {
 NetworkPanel::NetworkPanel(NetworkService &service, QWidget *parent)
     : QDialog(parent), service_(service) {
@@ -44,13 +47,28 @@ NetworkPanel::NetworkPanel(NetworkService &service, QWidget *parent)
     layout->addWidget(refresh_);
     layout->addWidget(note);
     connect(enabled_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (closing_)
+            return;
         if (enabled)
             service_.start();
-        else
-            service_.stop();
+        else {
+            const bool handled = isSignalConnected(QMetaMethod::fromSignal(&NetworkPanel::stopRequested));
+            emit stopRequested();
+            if (!handled)
+                service_.stop();
+        }
     });
     connect(refresh_, &QPushButton::clicked, &service_, &NetworkService::refresh);
-    connect(&service_, &NetworkService::changed, this, &NetworkPanel::updateView);
+    connect(&service_, &NetworkService::changed, this, [this] {
+        if (isVisible())
+            updateView();
+    });
+    updateView();
+}
+void NetworkPanel::setClosing(bool closing) {
+    if (closing_ == closing)
+        return;
+    closing_ = closing;
     updateView();
 }
 void NetworkPanel::showEvent(QShowEvent *event) {
@@ -59,9 +77,11 @@ void NetworkPanel::showEvent(QShowEvent *event) {
 }
 void NetworkPanel::updateView() {
     const QSignalBlocker blocker(enabled_);
-    enabled_->setChecked(service_.running());
-    refresh_->setEnabled(service_.running());
-    status_->setText(service_.status());
+    enabled_->setChecked(service_.running() && !closing_);
+    enabled_->setEnabled(!closing_);
+    refresh_->setEnabled(service_.running() && !closing_);
+    status_->setText(closing_ ? QStringLiteral("正在召回派出实体，等待访客清理后关闭网络服务…")
+                             : service_.status());
     const auto info = service_.localInfo();
     local_->setText(
         QString(
@@ -77,17 +97,29 @@ void NetworkPanel::updateView() {
         QString::number(NetworkService::ProtocolVersion) + " · 源码指纹：" + service_.localFingerprint().left(12));
     const int scrollY = table_->verticalScrollBar()->value();
     const int scrollX = table_->horizontalScrollBar()->value();
-    QString selected;
+    QString selected, current;
+    const auto selection = table_->selectionModel()->selectedRows();
+    if (!selection.isEmpty())
+        selected = table_->item(selection.front().row(), 0)->data(Qt::UserRole).toString();
     if (table_->currentRow() >= 0 && table_->item(table_->currentRow(), 0))
-        selected = table_->item(table_->currentRow(), 0)->data(Qt::UserRole).toString();
+        current = table_->item(table_->currentRow(), 0)->data(Qt::UserRole).toString();
     const QSignalBlocker tableBlocker(table_);
-    table_->clearSelection();
-    table_->setCurrentCell(-1, -1);
     const auto devices = service_.devices();
-    table_->setRowCount(devices.size());
+    QHash<QString, int> rows;
+    for (int row = 0; row < table_->rowCount(); ++row)
+        if (const auto *item = table_->item(row, 0))
+            rows.insert(item->data(Qt::UserRole).toString(), row);
+    const bool sameDevices = rows.size() == devices.size() &&
+        std::all_of(devices.cbegin(), devices.cend(), [&](const auto &d) { return rows.contains(d.id); });
+    if (!sameDevices) {
+        table_->setRowCount(devices.size());
+        table_->clearSelection();
+        table_->setCurrentCell(-1, -1);
+    }
     int online = 0;
-    for (int row = 0; row < devices.size(); ++row) {
-        const auto &d = devices[row];
+    for (int index = 0; index < devices.size(); ++index) {
+        const auto &d = devices[index];
+        const int row = sameDevices ? rows.value(d.id) : index;
         if (d.state.startsWith("已连接"))
             ++online;
         const QStringList values{d.name.isEmpty() ? "待握手" : d.name,
@@ -109,16 +141,24 @@ void NetworkPanel::updateView() {
                 item = new QTableWidgetItem;
                 table_->setItem(row, col, item);
             }
-            item->setText(values[col]);
-            if (col == 12)
+            if (item->text() != values[col])
+                item->setText(values[col]);
+            if (col == 12 && item->toolTip() != d.fingerprint)
                 item->setToolTip(d.fingerprint);
-            item->setData(Qt::UserRole, d.id);
-            item->setForeground(d.state.startsWith("已连接")
-                                    ? palette().brush(QPalette::Text)
-                                    : palette().brush(QPalette::Disabled, QPalette::Text));
+            if (item->data(Qt::UserRole).toString() != d.id)
+                item->setData(Qt::UserRole, d.id);
+            const auto foreground = d.state.startsWith("已连接")
+                ? palette().brush(QPalette::Text)
+                : palette().brush(QPalette::Disabled, QPalette::Text);
+            if (item->foreground() != foreground)
+                item->setForeground(foreground);
         }
-        if (d.id == selected)
-            table_->selectRow(row);
+        if (!sameDevices && d.id == selected)
+            table_->selectionModel()->select(table_->model()->index(row, 0),
+                QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        if (!sameDevices && d.id == current)
+            table_->selectionModel()->setCurrentIndex(table_->model()->index(row, 0),
+                QItemSelectionModel::NoUpdate);
     }
     table_->verticalScrollBar()->setValue(scrollY);
     table_->horizontalScrollBar()->setValue(scrollX);

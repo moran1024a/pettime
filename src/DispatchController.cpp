@@ -7,6 +7,15 @@
 
 namespace pettime {
 namespace {
+constexpr qint64 ConfirmMs = 3000;
+constexpr qint64 AnimationWatchdogMs = 10000;
+constexpr qint64 InterpolationMs = 100;
+QPointF safePosition(QPointF point, QRectF area) {
+    const double mx = std::min(36.0, area.width() * .45);
+    const double my = std::min(36.0, area.height() * .45);
+    return {std::clamp(point.x(), area.left() + mx, area.right() - mx),
+            std::clamp(point.y(), area.top() + my, area.bottom() - my)};
+}
 QString uuid() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 bool validUuid(const QString &s) {
     return !QUuid(s).isNull() && QUuid(s).toString(QUuid::WithoutBraces) == s;
@@ -46,7 +55,15 @@ DispatchController::DispatchController(NetworkService &network, SwarmController 
     connect(&network_, &NetworkService::dispatchMessage, this, &DispatchController::receive);
     connect(&network_, &NetworkService::stopping, this, &DispatchController::shutdown);
 }
-DispatchController::~DispatchController() { shutdown(); }
+DispatchController::~DispatchController() {
+    // The application explicitly shuts down while its windows are alive. During
+    // member destruction their callbacks/receivers may already have been destroyed.
+    disconnect(this, nullptr, nullptr, nullptr);
+    hideLocal = {};
+    hideVisitor = {};
+    localSurface = {};
+    shutdown();
+}
 qint64 DispatchController::now() const { return now_ ? now_() : clock_.elapsed(); }
 bool DispatchController::send(const QString &peer, const QString &op, QJsonObject data,
                               const QString &key) {
@@ -59,46 +76,90 @@ QString DispatchController::peerName(const QString &peer) const {
             return d.name;
     return peer.left(8);
 }
-bool DispatchController::isAway(quint64 id) const {
+bool DispatchController::isLocalVisible(quint64 id) const {
     const auto it = outgoing_.constFind(id);
-    return it != outgoing_.cend() && it->phase != Phase::Offering;
+    return it == outgoing_.cend() || !it->localHidden;
+}
+bool DispatchController::isAway(quint64 id) const { return !isLocalVisible(id); }
+int DispatchController::awayCount() const {
+    return int(std::count_if(outgoing_.cbegin(), outgoing_.cend(),
+                             [](const Outgoing &o) { return o.localHidden; }));
 }
 bool DispatchController::canControl(quint64 id) const {
     const auto it = outgoing_.constFind(id);
-    return it == outgoing_.cend() || it->phase == Phase::Active;
+    return it == outgoing_.cend() || (it->phase == Phase::Active && it->frozenAt < 0 &&
+                                     !it->awaitingActive && !it->recallRequested);
+}
+bool DispatchController::canHighlight(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    if (!p || p->dispatchPaused) return false;
+    const auto it = outgoing_.constFind(id);
+    return it == outgoing_.cend() || (!it->localHidden || it->phase == Phase::Active ||
+                                    it->phase == Phase::LeavingRemote);
 }
 QString DispatchController::location(quint64 id) const {
-    return outgoing_.contains(id) ? peerName(outgoing_[id].peer) : QStringLiteral("本机");
+    const auto it = outgoing_.constFind(id);
+    return it != outgoing_.cend() && it->localHidden ? peerName(it->peer)
+                                                    : QStringLiteral("本机");
 }
 QString DispatchController::stateText(quint64 id) const {
-    if (!outgoing_.contains(id))
-        return "本地";
-    const auto &o = outgoing_[id];
+    const auto it = outgoing_.constFind(id);
+    if (it == outgoing_.cend()) {
+        const auto *p = swarm_.find(id);
+        return p && p->entering() ? QStringLiteral("返回入场中") : QStringLiteral("本地");
+    }
+    const auto &o = *it;
     if (o.frozenAt >= 0)
-        return QString("等待重连（%1 秒）")
-            .arg(std::max<qint64>(0, (GraceMs - now() + o.frozenAt + 999) / 1000));
+        return QString("等待重连（%1 秒）%2")
+            .arg(std::max<qint64>(0, (GraceMs - now() + o.frozenAt + 999) / 1000))
+            .arg(o.recallRequested ? " · 待召回" : "");
     switch (o.phase) {
-    case Phase::Offering:
-        return "请求中";
-    case Phase::Activating:
-        return "确认中";
-    case Phase::Active:
-        return "已派遣";
-    case Phase::Frozen:
-        return "等待重连";
-    case Phase::Recalling:
-        return "召回中";
+    case Phase::Offering: return "请求中";
+    case Phase::LeavingLocal: return "本机离场中";
+    case Phase::Activating: return "交接确认中";
+    case Phase::Active: {
+        const auto *p = swarm_.find(id);
+        return p && p->entering() ? "远端入场中" : "已派遣";
+    }
+    case Phase::LeavingRemote: return "远端离场中";
+    case Phase::AwaitingHidden: return "等待离场确认";
     }
     return {};
 }
+QString DispatchController::visitorStateText(const Visitor &v) const {
+    if (v.hidden) return "已隐藏";
+    if (v.frozen) return "等待重连";
+    if (!v.active) return "预留中";
+    if (v.finishing) return "离场确认中";
+    if (v.stage == 1) return "离场中";
+    if (v.stage == 2) return "入场中";
+    return v.returnRequested ? "等待返程" : "只读访客";
+}
+QPointF DispatchController::savedPosition(quint64 id) const {
+    const auto *p = swarm_.find(id);
+    if (!p) return {};
+    const auto it = outgoing_.constFind(id);
+    const auto point = it == outgoing_.cend() ? p->position : it->home;
+    const auto area = localSurface ? localSurface(point)
+                                  : it == outgoing_.cend() ? p->area : it->homeArea;
+    return safePosition(point, area);
+}
+void DispatchController::updateLocalSurface(quint64 id, QRectF area) {
+    auto it = outgoing_.find(id);
+    if (it == outgoing_.end() || area.width() <= 0 || area.height() <= 0) return;
+    it->homeArea = area;
+    it->home = safePosition(it->home, area);
+    if (!it->localHidden)
+        if (auto *p = swarm_.find(id)) p->setArea(area);
+}
 QString DispatchController::dispatchPets(const QList<quint64> &ids, const QString &peer) {
-    if (!network_.dispatchReady(peer))
+    if (stopping_ || !network_.dispatchReady(peer))
         return "目标未连接或不支持派遣，请先开启双方网络服务。";
     int accepted = 0, skipped = 0;
     QSet<quint64> unique(ids.begin(), ids.end());
     for (auto id : unique) {
         auto *p = swarm_.find(id);
-        if (!p || p->primary || !p->active() || p->expired || p->splitReady ||
+        if (!p || p->primary || !p->active() || p->expired || p->splitReady || p->transitioning() ||
             outgoing_.contains(id)) {
             ++skipped;
             continue;
@@ -106,6 +167,7 @@ QString DispatchController::dispatchPets(const QList<quint64> &ids, const QStrin
         Outgoing o;
         o.entity = id;
         o.id = uuid();
+        o.stream = uuid();
         o.peer = peer;
         o.session = network_.peerSession(peer);
         o.home = p->position;
@@ -113,11 +175,13 @@ QString DispatchController::dispatchPets(const QList<quint64> &ids, const QStrin
         o.started = now();
         outgoing_.insert(id, o);
         if (!send(peer, "offer",
-                  {{"id", o.id}, {"entity", QString::number(id)}, {"name", name(*p)}})) {
+                  {{"id", o.id}, {"stream", o.stream}, {"entity", QString::number(id)}, {"name", name(*p)}})) {
             outgoing_.remove(id);
             ++skipped;
             continue;
         }
+        p->setManualControl(false);
+        p->dispatchLocked = true;
         ++accepted;
     }
     emit changed();
@@ -126,38 +190,88 @@ QString DispatchController::dispatchPets(const QList<quint64> &ids, const QStrin
         .arg(skipped);
 }
 void DispatchController::finish(quint64 id, bool restore) {
-    if (!outgoing_.contains(id))
-        return;
+    if (!outgoing_.contains(id)) return;
     const auto o = outgoing_.take(id);
     if (auto *p = swarm_.find(id)) {
-        p->cancelEntry();
+        const bool outside = !p->area.contains(p->position);
+        const int edge = p->transitionEdge();
+        const double fraction = p->transitionFraction();
+        p->cancelTransition();
         p->setManualControl(false);
         p->motionGroup.clear();
-        p->dispatchPaused = false;
-        if (restore && o.phase != Phase::Offering)
-            p->moveTo(o.home, o.homeArea);
+        p->dispatchPaused = p->dispatchLocked = false;
+        if (restore && p->active() && !p->expired) {
+            const QRectF area = localSurface ? localSurface(o.home) : o.homeArea;
+            if (o.localHidden)
+                p->beginEntry(area, o.homeEdge, o.homeFraction);
+            else if (outside)
+                p->beginEntry(area, edge, fraction);
+            else
+                p->moveTo(p->position, area);
+        }
     }
     emit changed();
 }
-void DispatchController::recallPet(quint64 id) {
-    if (!outgoing_.contains(id))
+void DispatchController::activate(quint64 id) {
+    auto it = outgoing_.find(id);
+    auto *p = swarm_.find(id);
+    if (it == outgoing_.end() || !p || it->phase != Phase::LeavingLocal ||
+        it->frozenAt >= 0 || !p->exitComplete()) return;
+    it->homeEdge = p->transitionEdge();
+    it->homeFraction = p->transitionFraction();
+    // The renderer hides synchronously. Never rely on deferred changed() reconciliation.
+    if (hideLocal) hideLocal(id);
+    it->localHidden = true;
+    p->motionGroup = it->peer;
+    p->dispatchPaused = true;
+    p->beginEntry(it->remoteArea, it->homeEdge ^ 1, it->homeFraction);
+    it->phase = Phase::Activating;
+    it->started = now();
+    it->awaitingActive = true;
+    send(it->peer, "activate", {{"id", it->id}, {"stream", it->stream},
+        {"state", PetRenderState::from(*p).encode()}, {"name", name(*p)}, {"stage", 2}});
+    emit changed();
+}
+void DispatchController::beginReturn(quint64 id) {
+    auto it = outgoing_.find(id);
+    auto *p = swarm_.find(id);
+    if (it == outgoing_.end() || !p || it->phase != Phase::Active || it->frozenAt >= 0)
         return;
-    auto &o = outgoing_[id];
-    if (o.phase == Phase::Recalling)
+    it->recallRequested = true;
+    p->dispatchLocked = true;
+    if (!p->beginExit()) {
+        removeEntity(id);
         return;
-    const bool local =
-        o.phase == Phase::Offering || o.frozenAt >= 0 || !network_.dispatchReady(o.peer);
-    const auto copy = o;
-    if (local)
-        finish(id);
-    else {
-        o.phase = Phase::Recalling;
-        o.started = now();
-        if (auto *p = swarm_.find(id))
-            p->dispatchPaused = true;
     }
-    if (!send(copy.peer, "recall", {{"id", copy.id}}))
+    it->phase = Phase::LeavingRemote;
+    it->started = now();
+    emit changed();
+}
+void DispatchController::sendExit(quint64 id) {
+    auto it = outgoing_.find(id);
+    auto *p = swarm_.find(id);
+    if (it == outgoing_.end() || !p) return;
+    it->phase = Phase::AwaitingHidden;
+    it->started = now();
+    p->dispatchPaused = true;
+    send(it->peer, "finishExit", {{"id", it->id}, {"stream", it->stream},
+        {"sequence", QString::number(++it->sequence)},
+        {"state", PetRenderState::from(*p).encode()}, {"name", name(*p)}});
+    emit changed();
+}
+void DispatchController::recallPet(quint64 id) {
+    auto it = outgoing_.find(id);
+    if (it == outgoing_.end()) return;
+    it->recallRequested = true;
+    if (!it->localHidden) {
+        const auto copy = *it;
         finish(id);
+        send(copy.peer, "recall", {{"id", copy.id}});
+    } else if (it->phase == Phase::Active && it->frozenAt < 0 &&
+               network_.dispatchReady(it->peer)) {
+        beginReturn(id);
+    }
+    // During activation/freeze retain the intent until the peer's state is known.
     emit changed();
 }
 void DispatchController::recallAll() {
@@ -172,7 +286,7 @@ void DispatchController::removeEntity(quint64 id) {
     send(o.peer, "recall", {{"id", o.id}});
 }
 bool DispatchController::highlightPet(quint64 id) {
-    if (!outgoing_.contains(id) || !canControl(id))
+    if (!outgoing_.contains(id) || !isAway(id) || !canHighlight(id))
         return false;
     const auto o = outgoing_[id];
     return send(
@@ -180,40 +294,54 @@ bool DispatchController::highlightPet(quint64 id) {
         {{"id", o.id}, {"stream", o.stream}, {"event", QString::number(++highlightSerial_)}});
 }
 bool DispatchController::expelVisitor(const QString &id) {
-    const auto it = visitors_.constFind(id);
-    if (it == visitors_.cend())
-        return false;
-    const auto v = *it;
-    eraseVisitor(id);
-    send(v.peer, "expelled", {{"id", id}});
+    auto it = visitors_.find(id);
+    if (it == visitors_.end()) return false;
+    const auto peer = it->peer;
+    if (!it->active || it->frozen || !network_.dispatchReady(peer)) {
+        eraseVisitor(id);
+        send(peer, "gone", {{"id", id}});
+    } else {
+        if (it->returnRequested) return true;
+        it->returnRequested = true;
+        it->returnRequestedAt = now();
+        send(peer, "returnRequest", {{"id", id}, {"stream", it->stream}});
+        emit changed();
+    }
     return true;
 }
 void DispatchController::eraseVisitor(const QString &id) {
-    if (!visitors_.contains(id))
-        return;
+    auto it = visitors_.find(id);
+    if (it == visitors_.end()) return;
+    it->hidden = true;
+    if (hideVisitor) hideVisitor(id);
     const auto v = visitors_.take(id);
     auto &closed = ended_[v.peer];
-    if (closed.size() < 4096)
-        closed.insert(id);
+    if (closed.size() < 4096) closed.insert(id);
     emit changed();
 }
 void DispatchController::freeze(Outgoing &o) {
-    if (o.phase == Phase::Offering || o.phase == Phase::Recalling)
-        return;
-    if (o.frozenAt < 0)
-        o.frozenAt = now();
-    o.phase = Phase::Frozen;
+    if (o.phase == Phase::Offering) return;
+    if (o.frozenAt < 0) o.frozenAt = now();
+    // Preserve the exact transition phase, including a pending hide acknowledgement.
     o.awaitingActive = false;
-    if (auto *p = swarm_.find(o.entity))
-        p->dispatchPaused = true;
+    if (auto *p = swarm_.find(o.entity)) {
+        p->setManualControl(false);
+        p->dispatchPaused = p->dispatchLocked = true;
+    }
 }
 void DispatchController::freeze(Visitor &v) {
-    if (!v.active)
-        return;
-    if (v.frozenAt < 0)
-        v.frozenAt = now();
+    if (v.hidden) return;
+    if (v.frozenAt < 0) v.frozenAt = now();
     v.frozen = true;
     v.awaitingState = false;
+}
+void DispatchController::requestStop() {
+    if (stopping_ || !network_.running()) return;
+    stopping_ = true;
+    recallAll();
+    for (const auto &id : visitors_.keys()) expelVisitor(id);
+    emit changed();
+    if (outgoing_.isEmpty() && visitors_.isEmpty()) network_.stop();
 }
 void DispatchController::lost(const QString &peer) {
     for (auto &o : outgoing_)
@@ -249,7 +377,7 @@ void DispatchController::ready(const QString &peer, const QString &session) {
         auto &o = outgoing_[id];
         if (o.peer != peer)
             continue;
-        if (o.phase == Phase::Offering || o.phase == Phase::Recalling || o.session != session) {
+        if (o.phase == Phase::Offering || o.session != session) {
             finish(id);
             continue;
         }
@@ -280,6 +408,8 @@ void DispatchController::shutdown() {
     }
     health_.clear();
     ended_.clear();
+    stopping_ = false;
+    emit changed();
 }
 void DispatchController::receive(const QString &peer, const QString &session,
                                  const QJsonObject &m) {
@@ -319,10 +449,22 @@ void DispatchController::receive(const QString &peer, const QString &session,
             invalid();
             return;
         }
-        for (const auto &o : outgoing_)
-            if (o.peer == peer && o.phase != Phase::Offering)
-                if (auto *p = swarm_.find(o.entity))
-                    p->setArea(area);
+        for (auto &o : outgoing_)
+            if (o.peer == peer) {
+                o.remoteArea = area;
+                if (o.localHidden)
+                    if (auto *p = swarm_.find(o.entity)) {
+                        p->setArea(area);
+                        if (o.phase == Phase::AwaitingHidden && !p->exitComplete()) {
+                            o.phase = Phase::LeavingRemote;
+                            // The old terminal snapshot may now be inside the new surface.
+                            // A new stream cancels its pending hide and resumes the new path.
+                            const bool wasFrozen = o.frozenAt >= 0;
+                            freeze(o);
+                            if (!wasFrozen) resume(o);
+                        }
+                    }
+            }
         return;
     }
     if (op == "inventory") {
@@ -344,50 +486,25 @@ void DispatchController::receive(const QString &peer, const QString &session,
         return;
     }
     if (op == "states") {
-        if (!m["items"].isArray() || m["items"].toArray().size() > 71) {
-            invalid();
-            return;
-        }
+        receiveStates(peer, session, m);
+        return;
+    }
+    if (op == "renew") {
+        if (!m["items"].isArray() || m["items"].toArray().size() > 71) { invalid(); return; }
         for (const auto &item : m["items"].toArray()) {
             const auto a = item.toArray();
-            PetRenderState state;
-            quint64 sequence;
-            if (a.size() != 5 || !validUuid(a[0].toString()) || !validUuid(a[1].toString()) ||
-                !serial(a[2], sequence) || !PetRenderState::decode(a[3], state) ||
-                !a[4].isString() || a[4].toString().size() > 160) {
-                invalid();
-                return;
+            if (a.size() != 2 || !validUuid(a[0].toString()) || !validUuid(a[1].toString())) {
+                invalid(); return;
             }
             auto it = visitors_.find(a[0].toString());
-            if (it == visitors_.end()) {
-                send(peer, "gone", {{"id", a[0].toString()}});
+            if (it == visitors_.end()) { send(peer, "gone", {{"id", a[0]}}); continue; }
+            if (it->peer != peer || it->session != session) { invalid(); return; }
+            if (it->active || (it->frozen && !it->awaitingState) || it->stream != a[1].toString())
                 continue;
-            }
-            auto &v = it.value();
-            if (v.peer != peer || v.session != session) {
-                invalid();
-                return;
-            }
-            if (!v.active || (v.frozen && !v.awaitingState) || v.stream != a[1].toString() ||
-                sequence <= v.sequence)
-                continue;
-            if (v.frozenAt >= 0 && now() - v.frozenAt >= GraceMs) {
-                const auto id = v.id;
-                eraseVisitor(id);
-                send(peer, "gone", {{"id", id}});
-                continue;
-            }
-            if (v.awaitingState) {
-                v.awaitingState = false;
-                v.frozen = false;
-                v.frozenAt = -1;
-                emit changed();
-            }
-            v.previous = interpolated(v);
-            v.current = state;
-            v.sequence = sequence;
-            v.lastState = now();
-            v.name = a[4].toString();
+            if (it->frozenAt >= 0 && now() - it->frozenAt >= GraceMs) continue;
+            it->lastState = now();
+            it->awaitingState = it->frozen = false;
+            it->frozenAt = -1;
         }
         return;
     }
@@ -415,7 +532,7 @@ void DispatchController::receive(const QString &peer, const QString &session,
             return;
         }
         QRectF area;
-        if (ended_[peer].contains(id) || ended_[peer].size() >= 4096 ||
+        if (stopping_ || ended_[peer].contains(id) || ended_[peer].size() >= 4096 ||
             !rect(rect(surface_()), area)) {
             send(peer, "reject", {{"id", id}, {"reason", "派遣已结束或接收屏幕不可用"}});
             return;
@@ -431,6 +548,7 @@ void DispatchController::receive(const QString &peer, const QString &session,
             }
             Visitor v;
             v.id = id;
+            v.stream = validUuid(m["stream"].toString()) ? m["stream"].toString() : QString{};
             v.peer = peer;
             v.session = session;
             v.entity = m["entity"].toString();
@@ -454,16 +572,53 @@ void DispatchController::receive(const QString &peer, const QString &session,
         send(peer, "recalled", {{"id", id}});
         return;
     }
-    if (op == "recalled" || op == "reject" || op == "gone" || op == "expelled") {
+    if (op == "returnRequest") {
+        if (out != outgoing_.end() && out->stream == m["stream"].toString()) {
+            emit notice("对方请求驱赶，实体正在返回本机。");
+            recallPet(out.key());
+        }
+        return;
+    }
+    if (op == "hidden") {
+        quint64 sequence;
+        if (!serial(m["sequence"], sequence) || !validUuid(m["stream"].toString())) {
+            invalid(); return;
+        }
+        if (out != outgoing_.end() && out->phase == Phase::AwaitingHidden &&
+            out->stream == m["stream"].toString() && out->sequence == sequence)
+            finish(out.key());
+        return;
+    }
+    if (op == "recalled" || op == "reject" || op == "gone") {
         if (out != outgoing_.end()) {
-            if (op == "recalled" && out->phase != Phase::Recalling)
-                return;
-            if (op == "expelled")
-                emit notice("派遣实体已被对方驱赶，返回本机。");
-            if (op == "reject")
-                emit notice("派遣未完成：" + m["reason"].toString().left(160));
+            // Recalled acknowledges forced cancellation, never a normal return animation.
+            if (op == "recalled") return;
+            if (op == "reject" && out->phase != Phase::Offering) return;
+            if (op == "reject") emit notice("派遣未完成：" + m["reason"].toString().left(160));
             finish(out.key());
         }
+        return;
+    }
+    if (op == "finishExit") {
+        PetRenderState state;
+        quint64 sequence;
+        const QString stream = m["stream"].toString();
+        if (!validUuid(stream) || !serial(m["sequence"], sequence) ||
+            !PetRenderState::decode(m["state"], state)) { invalid(); return; }
+        if (visitor == visitors_.end()) { send(peer, "gone", {{"id", id}}); return; }
+        auto &v = *visitor;
+        if (!v.active || v.hidden || v.stream != stream || (v.frozen && !v.awaitingState) ||
+            (v.frozenAt >= 0 && now() - v.frozenAt >= GraceMs)) return;
+        if (sequence <= v.sequence || v.finishing) return;
+        v.previous = interpolated(v);
+        v.current = state;
+        v.sequence = sequence;
+        v.lastState = now();
+        v.stage = 1;
+        v.finishing = true;
+        v.awaitingState = v.frozen = false;
+        v.frozenAt = -1;
+        emit changed();
         return;
     }
     if (op == "accept") {
@@ -479,18 +634,15 @@ void DispatchController::receive(const QString &peer, const QString &session,
             removeEntity(out.key());
             return;
         }
-        p->motionGroup = peer;
-        p->dispatchPaused = true;
-        p->beginEntry(area, int(p->random(0, 4)), p->random(.2, .8));
-        out->phase = Phase::Activating;
+        out->remoteArea = area;
+        out->home = p->position;
+        out->homeArea = p->area;
+        p->dispatchLocked = true;
+        if (!p->beginExit()) { removeEntity(out.key()); return; }
+        out->homeEdge = p->transitionEdge();
+        out->homeFraction = p->transitionFraction();
+        out->phase = Phase::LeavingLocal;
         out->started = now();
-        out->stream = uuid();
-        out->awaitingActive = true;
-        send(peer, "activate",
-             {{"id", id},
-              {"stream", out->stream},
-              {"state", PetRenderState::from(*p).encode()},
-              {"name", name(*p)}});
         emit changed();
         return;
     }
@@ -499,7 +651,7 @@ void DispatchController::receive(const QString &peer, const QString &session,
             invalid();
             return;
         }
-        if (visitor == visitors_.end() || !visitor->active ||
+        if (visitor == visitors_.end() || visitor->hidden ||
             (visitor->frozenAt >= 0 && now() - visitor->frozenAt >= GraceMs)) {
             if (visitor != visitors_.end())
                 eraseVisitor(id);
@@ -522,11 +674,18 @@ void DispatchController::receive(const QString &peer, const QString &session,
             return;
         }
         if (auto *p = swarm_.find(out.key())) {
-            p->setArea(area);
+            out->remoteArea = area;
+            if (out->localHidden) {
+                p->setArea(area);
+                if (out->phase == Phase::AwaitingHidden && !p->exitComplete())
+                    out->phase = Phase::LeavingRemote;
+            }
             out->awaitingActive = true;
             send(peer, "commit",
                  {{"id", id},
                   {"stream", out->stream},
+                  {"phase", int(out->phase)},
+                  {"stage", out->phase >= Phase::LeavingRemote ? 1 : p->entering() ? 2 : 0},
                   {"state", PetRenderState::from(*p).encode()},
                   {"name", name(*p)}});
         }
@@ -550,9 +709,12 @@ void DispatchController::receive(const QString &peer, const QString &session,
             send(peer, "gone", {{"id", id}});
             return;
         }
-        if (op == "commit" && v.pendingStream != stream)
-            return;
-        if (op == "activate" && !v.active && now() - v.created >= 3000) {
+        if (op == "commit" && v.pendingStream != stream) return;
+        const int phase = op == "commit" ? m["phase"].toInt(-1) : int(Phase::Active);
+        if (phase < int(Phase::LeavingLocal) || phase > int(Phase::AwaitingHidden)) {
+            invalid(); return;
+        }
+        if (op == "activate" && !v.active && now() - v.lastState >= ConfirmMs) {
             eraseVisitor(id);
             send(peer, "gone", {{"id", id}});
             return;
@@ -568,29 +730,43 @@ void DispatchController::receive(const QString &peer, const QString &session,
         v.pendingStream.clear();
         v.sequence = 0;
         v.lastState = now();
-        v.active = true;
+        v.active = phase != int(Phase::LeavingLocal);
+        v.stage = phase >= int(Phase::LeavingRemote) ? 1 : m["stage"].toInt(2);
+        if (v.stage < 0 || v.stage > 2) { invalid(); return; }
+        v.finishing = false;
         v.awaitingState = op == "commit";
         v.frozen = v.awaitingState;
         if (!v.awaitingState)
             v.frozenAt = -1;
         send(peer, "active", {{"id", id}, {"stream", stream}});
+        if (v.returnRequested) {
+            v.returnRequestedAt = now();
+            send(peer, "returnRequest", {{"id", id}, {"stream", stream}});
+        }
         emit changed();
         return;
     }
     if (op == "active") {
         if (out == outgoing_.end() || !out->awaitingActive ||
-            out->stream != m["stream"].toString() || out->phase == Phase::Recalling ||
-            out->phase == Phase::Offering)
-            return;
+            out->stream != m["stream"].toString() || out->phase == Phase::Offering) return;
         if (out->frozenAt >= 0 && now() - out->frozenAt >= GraceMs) {
-            recallPet(out.key());
+            const auto entity = out.key();
+            const auto old = *out;
+            finish(entity);
+            send(peer, "recall", {{"id", old.id}});
             return;
         }
-        out->phase = Phase::Active;
+        if (out->phase == Phase::Activating) out->phase = Phase::Active;
         out->frozenAt = -1;
         out->awaitingActive = false;
-        if (auto *p = swarm_.find(out.key()))
-            p->dispatchPaused = false;
+        out->started = now();
+        if (auto *p = swarm_.find(out.key())) {
+            p->dispatchPaused = out->phase == Phase::AwaitingHidden;
+            p->dispatchLocked = out->phase != Phase::Active;
+        }
+        const auto entity = out.key();
+        if (out->phase == Phase::AwaitingHidden) sendExit(entity);
+        else if (out->phase == Phase::Active && out->recallRequested) beginReturn(entity);
         emit changed();
         return;
     }
@@ -600,7 +776,7 @@ void DispatchController::receive(const QString &peer, const QString &session,
             invalid();
             return;
         }
-        if (visitor != visitors_.end() && visitor->active && !visitor->frozen &&
+        if (visitor != visitors_.end() && visitor->active && !visitor->hidden && !visitor->frozen &&
             visitor->stream == m["stream"].toString() && event > visitor->highlight) {
             visitor->highlight = event;
             emit visitorHighlight(id);
@@ -613,34 +789,59 @@ void DispatchController::tick() {
     const auto time = now();
     for (auto id : outgoing_.keys()) {
         const auto o = outgoing_[id];
-        if (!swarm_.find(id)) {
+        auto *p = swarm_.find(id);
+        if (!p || !p->active() || p->expired || p->splitReady) {
+            // Remote retirement is destructive cleanup, not a return. Do not
+            // briefly materialize its fading model in a local window.
+            if (p && o.localHidden) p->expired = true;
             removeEntity(id);
             continue;
         }
         if ((o.frozenAt >= 0 && time - o.frozenAt >= GraceMs) ||
-            ((o.phase == Phase::Offering || o.phase == Phase::Recalling) &&
-             time - o.started >= 3000)) {
+            (o.phase == Phase::Offering && time - o.started >= ConfirmMs)) {
             finish(id);
             send(o.peer, "recall", {{"id", o.id}});
-            if (o.phase == Phase::Offering)
-                emit notice("派遣请求超时，实体仍保留在本机。");
-        } else if (o.phase == Phase::Activating && time - o.started >= 3000) {
+            if (o.phase == Phase::Offering) emit notice("派遣请求超时，实体仍保留在本机。");
+            continue;
+        }
+        if (o.frozenAt >= 0) continue;
+        if (o.phase == Phase::LeavingLocal && p->exitComplete()) activate(id);
+        else if (o.phase == Phase::LeavingRemote && p->exitComplete()) sendExit(id);
+        else if (((o.phase == Phase::Activating || o.phase == Phase::AwaitingHidden) &&
+                   time - o.started >= ConfirmMs) ||
+                 ((o.phase == Phase::LeavingLocal || o.phase == Phase::LeavingRemote) &&
+                   time - o.started >= AnimationWatchdogMs)) {
             freeze(outgoing_[id]);
             network_.disconnectPeer(o.peer);
+            emit changed();
         }
     }
     for (const auto &id : visitors_.keys()) {
         auto &v = visitors_[id];
-        if ((!v.active && time - v.created >= 3000) ||
-            (v.frozenAt >= 0 && time - v.frozenAt >= GraceMs)) {
+        if (v.frozenAt >= 0 && time - v.frozenAt >= GraceMs) {
             const auto peer = v.peer;
             eraseVisitor(id);
             send(peer, "gone", {{"id", id}});
-        } else if (v.active && !v.frozen && time - v.lastState >= 3000) {
+        } else if (!v.frozen && v.finishing && time - v.lastState >= InterpolationMs) {
+            const auto copy = v;
+            eraseVisitor(id); // Synchronous window hide precedes the acknowledgement.
+            send(copy.peer, "hidden", {{"id", id}, {"stream", copy.stream},
+                                      {"sequence", QString::number(copy.sequence)}});
+        } else if (!v.frozen && !v.active && time - v.lastState >= ConfirmMs) {
+            const auto peer = v.peer;
+            eraseVisitor(id);
+            send(peer, "gone", {{"id", id}});
+        } else if (!v.frozen && ((v.active && time - v.lastState >= ConfirmMs) ||
+                   (v.returnRequested && v.stage == 0 && v.returnRequestedAt >= 0 &&
+                    time - v.returnRequestedAt >= AnimationWatchdogMs))) {
             const auto peer = v.peer;
             freeze(v);
             network_.disconnectPeer(peer);
         }
+    }
+    if (stopping_ && outgoing_.isEmpty() && visitors_.isEmpty()) {
+        network_.stop();
+        return;
     }
     for (const auto &peer : health_.keys()) {
         if (time - health_[peer].lastRx < 120000 || network_.dispatchReady(peer))
@@ -705,33 +906,83 @@ void DispatchController::tick() {
                 send(peer, "surface", {{"area", rect(area)}}, "surface");
         }
     }
-    if (time < nextState_)
-        return;
-    nextState_ = time + 100;
+    if (time >= nextRenew_) {
+        nextRenew_ = time + 500;
+        QHash<QString, QJsonArray> reservations;
+        for (const auto &o : outgoing_)
+            if (o.phase == Phase::LeavingLocal && o.frozenAt < 0 && !o.awaitingActive)
+                reservations[o.peer].append(QJsonArray{o.id, o.stream});
+        for (auto it = reservations.cbegin(); it != reservations.cend(); ++it)
+            send(it.key(), "renew", {{"items", it.value()}}, "reservations");
+    }
+    if (time >= nextState_) {
+        nextState_ = time + 100;
+        publishStates();
+    }
+}
+void DispatchController::publishStates() {
     QHash<QString, QJsonArray> batches;
-    QHash<QString, int> parts;
+    QHash<QString, int> parts, bytes;
     auto flush = [&](const QString &peer) {
-        if (batches[peer].isEmpty())
-            return;
+        if (batches[peer].isEmpty()) return;
         send(peer, "states", {{"items", batches[peer]}},
              "states-" + QString::number(parts[peer]++));
         batches[peer] = {};
+        bytes[peer] = 2;
     };
     for (auto &o : outgoing_) {
-        if (o.phase != Phase::Active)
-            continue;
+        if ((o.phase != Phase::Active && o.phase != Phase::LeavingRemote) ||
+            o.frozenAt >= 0 || o.awaitingActive) continue;
         const auto *p = swarm_.find(o.entity);
-        if (!p)
-            continue;
+        if (!p) continue;
         const QJsonArray item{o.id, o.stream, QString::number(++o.sequence),
-                              PetRenderState::from(*p).encode(), name(*p)};
-        auto trial = batches[o.peer];
-        trial.append(item);
-        if (QJsonDocument(trial).toJson(QJsonDocument::Compact).size() > 7600)
-            flush(o.peer);
+            PetRenderState::from(*p).encode(), name(*p), o.phase == Phase::LeavingRemote ? 1 : p->entering() ? 2 : 0};
+        // Measure each item once instead of repeatedly serializing the growing batch.
+        const int size = QJsonDocument(item).toJson(QJsonDocument::Compact).size();
+        if (bytes.value(o.peer, 2) + size + 1 > 7600) flush(o.peer);
+        bytes[o.peer] = bytes.value(o.peer, 2) + size + (batches[o.peer].isEmpty() ? 0 : 1);
         batches[o.peer].append(item);
     }
-    for (const auto &peer : batches.keys())
-        flush(peer);
+    for (const auto &peer : batches.keys()) flush(peer);
+}
+void DispatchController::receiveStates(const QString &peer, const QString &session,
+                                        const QJsonObject &m) {
+    auto invalid = [&] { network_.disconnectPeer(peer); };
+    if (!m["items"].isArray() || m["items"].toArray().size() > 71) { invalid(); return; }
+    for (const auto &item : m["items"].toArray()) {
+        const auto a = item.toArray();
+        PetRenderState state;
+        quint64 sequence;
+        if (a.size() != 6 || !validUuid(a[0].toString()) || !validUuid(a[1].toString()) ||
+            !serial(a[2], sequence) || !PetRenderState::decode(a[3], state) ||
+            !a[4].isString() || a[4].toString().size() > 160 ||
+            !a[5].isDouble() || (a[5].toDouble() != 0 && a[5].toDouble() != 1 && a[5].toDouble() != 2)) {
+            invalid(); return;
+        }
+        auto it = visitors_.find(a[0].toString());
+        if (it == visitors_.end()) { send(peer, "gone", {{"id", a[0]}}); continue; }
+        auto &v = *it;
+        if (v.peer != peer || v.session != session) { invalid(); return; }
+        if (!v.active || v.hidden || v.finishing || (v.frozen && !v.awaitingState) ||
+            v.stream != a[1].toString() || sequence <= v.sequence ||
+            (v.stage == 1 && a[5].toInt() != 1)) continue;
+        if (v.frozenAt >= 0 && now() - v.frozenAt >= GraceMs) {
+            const auto id = v.id;
+            eraseVisitor(id);
+            send(peer, "gone", {{"id", id}});
+            continue;
+        }
+        v.previous = interpolated(v);
+        v.current = state;
+        v.sequence = sequence;
+        v.lastState = now();
+        v.name = a[4].toString();
+        v.stage = a[5].toInt();
+        if (v.awaitingState) {
+            v.awaitingState = v.frozen = false;
+            v.frozenAt = -1;
+            emit changed();
+        }
+    }
 }
 } // namespace pettime

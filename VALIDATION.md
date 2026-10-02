@@ -1,5 +1,18 @@
 # 重构验证记录
 
+## 0.3.4 完整边缘过渡与交接整理（2026-10-02）
+
+- `cmake --build build -j4` 成功，`pettime --version` 输出 `Pettime 0.3.4`；协议升级为 4，派遣能力为 `dispatch-v2`，源码指纹自动更新。
+- 最终 `ctest --test-dir build --output-on-failure` 四组全部通过，共 31.08 秒：fingerprint 0.16 秒、dispatch 6.70 秒、network 23.51 秒、pettime 0.72 秒。30 秒宽限及长时间心跳由模拟时钟推进，不进行长时间实等。
+- 模型覆盖最近四边和等距选择、负坐标、边缘外完整出入场、角落入场、变量时间步、入场途中折返、动作锁、投喂取消、屏幕变化重算及冻结时成长暂停。
+- 派遣覆盖六阶段冻结与恢复、隐藏确认的会话／流／序号匹配、可靠终态不被迟到快照覆盖、100 毫秒末帧插值完成后隐藏、隐藏后才能确认返程、预留和库存核对、离线重复驱赶、过期记录不能复活。
+- 本地两个真实 TCP/UDP 客户端验证本机离场途中重连、远端返程途中重连、发送离场终态时中断后续接、入场中驱赶、双方同时派遣后关闭服务排空；71 只子体批量派遣及召回通过，接收端本地上限为 1、自有实体数量保持 1，来源端主实体及总数 72 保持。
+- 窗口与进度回归覆盖同步隐藏实体及高亮、过渡高亮裁剪与冻结禁用、隐藏确认前屏幕扩大后继续离场、容量淘汰尚未销毁模型时不创建本机窗口、派遣及屏幕外过渡按有效本机位置保存、列表只更新变化单元格并保持选择及滚动位置。
+- X11（`QT_QPA_PLATFORM=xcb`）执行 `localHandoffSynchronouslyHidesWindowAndHighlight`、`visitorExitSynchronouslyHidesWindowAndHighlight`、`localTransitionHighlightClipsAndFrozenDispatchDisablesIt`、`remoteRetirementNeverCreatesLocalWindowBeforeSwarmRemoval`、`refreshChangesCellsWithoutTouchingSelection`，含初始化／清理共 7 PASS，1.905 秒。
+- X11 72 实体烟雾测试 3.007 秒，`passed=true`，平均 tick 3.36 毫秒、最大 12.02 毫秒，主窗口绘制 159 帧；进度、报告和图像全部位于 `/tmp/pettime-034-smoke-_el34ezl`，测试进程已退出，临时产物已在提交前清理。此结果为短时运行检查，不代表长期性能或与旧版的性能对比。
+- 首轮新增测试发现夹具中的网络时钟未推进导致发送预算耗尽，以及初始空库存消息迟到删除测试访客；已分别改为推进模拟时间、等待双端初始库存消息。实现审查修复了析构回调顺序、重复驱赶的离线清理、远端容量淘汰重显和屏幕变化后的终态失效问题。
+- 使用 Ubuntu 24.04 / Qt 6.4.2 本地验证，未连接远端测试机，未做 Windows 实际编译运行、真实混合 DPI 多屏或长期压力测试。本节记录提交前的本地验证结果。
+
 ## 0.3.3 绿色配置与实体进度（2026-09-29）
 
 - `cmake --build build -j4` 成功，`pettime --version` 输出 `Pettime 0.3.3`；协议保持 3，源码指纹自动更新。

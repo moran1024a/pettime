@@ -14,7 +14,8 @@ PetWindow::PetWindow(PetModel &model, const AnimationLibrary &animation)
     setAttribute(Qt::WA_ShowWithoutActivating);
     setFocusPolicy(Qt::NoFocus);
     setWindowTitle(model.primary ? "Pettime" : "Pettime · 若虫");
-    setFixedSize(model.primary ? 320 : 224, model.primary ? 320 : 224);
+    const int extent = model.primary ? 320 : PetWindowExtent;
+    setFixedSize(extent, extent);
 }
 PetWindow::PetWindow(const AnimationLibrary &animation)
     : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
@@ -25,7 +26,7 @@ PetWindow::PetWindow(const AnimationLibrary &animation)
     setAttribute(Qt::WA_TransparentForMouseEvents);
     setFocusPolicy(Qt::NoFocus);
     setWindowTitle("Pettime · 访客");
-    setFixedSize(224, 224);
+    setFixedSize(PetWindowExtent, PetWindowExtent);
 }
 void PetWindow::presentRemote(const PetRenderState &state, const QString &name, bool frozen) {
     remote_ = state;
@@ -58,6 +59,8 @@ QRegion PetWindow::inputRegion(const QImage &source, QSize logicalSize) {
     return region.isEmpty() ? QRegion(-2, -2, 1, 1) : region;
 }
 void PetWindow::highlight() {
+    if (!isVisible() || frozen_ || (model_ && model_->dispatchPaused))
+        return;
     if (!highlight_) {
         highlight_ = std::make_unique<QLabel>(
             nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
@@ -74,8 +77,13 @@ void PetWindow::highlight() {
     highlightElapsed_ = 0;
     highlightClock_.restart();
     present();
-    highlight_->show();
-    highlight_->raise();
+    if (highlight_->isVisible()) highlight_->raise();
+}
+void PetWindow::hidePet() {
+    if (highlight_)
+        highlight_->hide();
+    highlightElapsed_ = 3000;
+    hide();
 }
 void PetWindow::present() {
     const auto state = model_ ? PetRenderState::from(*model_) : remote_;
@@ -83,12 +91,14 @@ void PetWindow::present() {
     QRegion region = inputRegion(image_, size());
     const QPoint topLeft(qRound(state.position.x() - width() * .5),
                          qRound(state.position.y() - height() * .5));
-    if (!model_)
+    if (model_ && model_->transitioning())
+        region &= QRegion(model_->area.toAlignedRect().translated(-topLeft));
+    else if (!model_)
         if (const auto *screen = QGuiApplication::primaryScreen()) {
             region &= QRegion(screen->availableGeometry().translated(-topLeft));
-            if (region.isEmpty())
-                region = QRegion(-2, -2, 1, 1);
         }
+    if (region.isEmpty())
+        region = QRegion(-2, -2, 1, 1);
     if (region != mask_) {
         mask_ = region;
         setMask(mask_);
@@ -103,6 +113,14 @@ void PetWindow::present() {
         else {
             highlight_->setText(model_ ? model_->displayName() : remoteName_);
             highlight_->setGeometry(geometry());
+            QRegion clip(QRect(QPoint{}, size()));
+            if (model_ && model_->transitioning())
+                clip &= QRegion(model_->area.toAlignedRect().translated(-topLeft));
+            else if (!model_)
+                if (const auto *screen = QGuiApplication::primaryScreen())
+                    clip &= QRegion(screen->availableGeometry().translated(-topLeft));
+            highlight_->setMask(clip.isEmpty() ? QRegion(-2, -2, 1, 1) : clip);
+            highlight_->setVisible(isVisible() && !clip.isEmpty());
         }
     }
     update();
@@ -144,7 +162,8 @@ void PetWindow::mouseReleaseEvent(QMouseEvent *e) {
 void PetWindow::mouseDoubleClickEvent(QMouseEvent *e) {
     if (!model_)
         return;
-    if (e->button() == Qt::LeftButton && model_->active()) {
+    if (e->button() == Qt::LeftButton && model_->active() && !model_->transitioning() &&
+        !model_->dispatchLocked) {
         model_->dragging = false;
         model_->crush();
         emit crushed();

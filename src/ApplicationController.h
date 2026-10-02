@@ -41,6 +41,8 @@ class ApplicationController : public QObject {
     void clearControlKeys();
     void validateControl();
     bool canStartControl(quint64 id) const;
+    bool canFeedPet(quint64 id) const;
+    bool canDispatchPet(quint64 id) const;
     void tick();
     void makeMenu();
     void showPets();

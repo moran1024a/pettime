@@ -15,6 +15,7 @@ class PetWindow : public QWidget {
     void present();
     void presentRemote(const PetRenderState &state, const QString &name, bool frozen);
     void highlight();
+    void hidePet();
     const QImage &image() const { return image_; }
     int paintedFrames() const { return painted_; }
     static QRegion inputRegion(const QImage &image, QSize logicalSize);

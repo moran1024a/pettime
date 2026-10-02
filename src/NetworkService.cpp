@@ -454,7 +454,7 @@ QJsonObject NetworkService::localData() {
             {"revision", revision_},
             {"appVersion", options_.appVersion},
             {"fingerprint", options_.fingerprint},
-            {"capabilities", dispatchEnabled_ ? QJsonArray{"dispatch-v1"} : QJsonArray{}},
+            {"capabilities", dispatchEnabled_ ? QJsonArray{"dispatch-v2"} : QJsonArray{}},
             {"dispatched", info.dispatched},
             {"visitors", info.visitors}};
 }
@@ -653,7 +653,7 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
                 emit changed();
                 return false;
             }
-            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v1");
+            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v2");
             c.peer = id;
             c.session = session;
             c.token = o["connectionId"].toString();
@@ -668,7 +668,7 @@ bool NetworkService::handle(Connection &c, const QJsonObject &o) {
             if (!peers_.contains(c.peer) || o["sessionId"] != c.session ||
                 !applyInfo(peers_[c.peer], o))
                 return false;
-            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v1");
+            c.dispatch = dispatchEnabled_ && o["capabilities"].toArray().contains("dispatch-v2");
             if (!send(c.socket, {{"type", "ready"}, {"connectionId", c.token}}))
                 return false;
             markReady(c);

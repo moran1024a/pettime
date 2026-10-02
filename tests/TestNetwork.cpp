@@ -115,6 +115,7 @@ class NetworkTest : public QObject {
         DispatchController guest(*pair.b, target, [] { return QRectF(0, 0, 1280, 720); });
         QTimer timer;
         connect(&timer, &QTimer::timeout, this, [&] {
+            pair.time += 20;
             owner.tick();
             guest.tick();
             source.advance(.02);
@@ -133,8 +134,7 @@ class NetworkTest : public QObject {
         QTRY_VERIFY(owner.outgoing().contains(2) &&
                     owner.outgoing()[2].phase == DispatchController::Phase::Active);
         QVERIFY(sawActivation);
-        QVERIFY(firstFrame.position.x() == 0 || firstFrame.position.x() == 1280 ||
-                firstFrame.position.y() == 0 || firstFrame.position.y() == 720);
+        QVERIFY(!QRectF(0, 0, 1280, 720).contains(firstFrame.position));
         const QString id = owner.outgoing()[2].id;
         QTRY_VERIFY(guest.visitors().contains(id) && guest.visitors()[id].sequence > 0);
         auto *p = source.find(2);
@@ -166,6 +166,8 @@ class NetworkTest : public QObject {
         QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());
         QVERIFY(!owner.isAway(2));
         QVERIFY(!p->manuallyControlled());
+        QVERIFY(p->entering());
+        QTRY_VERIFY(!p->entering());
         // Expel during entry, before manual input is allowed.
         owner.dispatchPets({2}, pair.b->deviceId());
         QTRY_VERIFY(owner.outgoing().contains(2) &&
@@ -174,8 +176,9 @@ class NetworkTest : public QObject {
         QVERIFY(p->entering());
         QVERIFY(guest.expelVisitor(enteringId));
         QTRY_VERIFY(owner.outgoing().isEmpty());
-        QVERIFY(!p->entering());
+        QVERIFY(p->entering());
         QVERIFY(guest.visitors().isEmpty());
+        QTRY_VERIFY(!p->entering());
         // Expel while disconnected; reconnect must reconcile without resurrection.
         owner.dispatchPets({2}, pair.b->deviceId());
         QTRY_VERIFY(owner.outgoing().contains(2) &&
@@ -190,6 +193,163 @@ class NetworkTest : public QObject {
         QTRY_VERIFY(pair.connected());
         QTRY_VERIFY(owner.outgoing().isEmpty());
         QVERIFY(guest.visitors().isEmpty());
+    }
+    void transitionReconnectAndOrder() {
+        Pair pair;
+        const QRectF home(-800, 20, 800, 600), remote(100, 200, 1200, 800);
+        SwarmController source(1, home.center(), home), target(2, remote.center(), remote);
+        source.spawn(home.center(), home, 1, 1);
+        DispatchController owner(*pair.a, source, [=] { return home; }, [&] { return pair.time; });
+        DispatchController guest(*pair.b, target, [=] { return remote; }, [&] { return pair.time; });
+        owner.localSurface = [=](QPointF) { return home; };
+        auto *pet = source.find(2);
+        int localHides = 0, remoteHides = 0;
+        bool hiddenBeforeActivate = true, hiddenBeforeReturn = true;
+        bool cutAtTerminal = false, terminalWasCut = false;
+        owner.hideLocal = [&](quint64 id) {
+            QCOMPARE(id, quint64(2));
+            QVERIFY(pet->exitComplete());
+            QVERIFY(!home.contains(pet->position));
+            ++localHides;
+        };
+        guest.hideVisitor = [&](const QString &) { ++remoteHides; };
+        connect(pair.b.get(), &NetworkService::dispatchMessage, this,
+            [&](const QString &, const QString &, const QJsonObject &m) {
+                if (m["op"] == "activate")
+                    hiddenBeforeActivate &= localHides > remoteHides;
+            });
+        connect(&owner, &DispatchController::changed, this, [&] {
+            if (owner.outgoing().isEmpty() && localHides)
+                hiddenBeforeReturn &= remoteHides == localHides;
+        });
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, this, [&] {
+            pair.time += 40; // Advance simulation faster; TCP still uses real local sockets.
+            owner.tick();
+            if (cutAtTerminal && owner.outgoing().contains(2) &&
+                owner.outgoing()[2].phase == DispatchController::Phase::AwaitingHidden) {
+                cutAtTerminal = false;
+                terminalWasCut = true;
+                pair.a->disconnectPeer(pair.b->deviceId());
+            }
+            guest.tick();
+            source.advance(.04);
+        });
+        timer.start(10);
+        QVERIFY(pair.start());
+        QTRY_VERIFY(pair.connected());
+        owner.dispatchPets({2}, pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::LeavingLocal);
+        const auto dispatchId = owner.outgoing()[2].id;
+        QCOMPARE(localHides, 0);
+        QVERIFY(guest.visitors().contains(dispatchId));
+        QVERIFY(!guest.visitors()[dispatchId].active);
+        pair.a->disconnectPeer(pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing()[2].frozenAt >= 0 && guest.visitors()[dispatchId].frozen);
+        const auto position = pet->position;
+        source.advance(1);
+        QCOMPARE(pet->position, position);
+        pair.time += 1000;
+        pair.a->refresh(); pair.b->refresh();
+        QTRY_VERIFY(pair.connected());
+        QTRY_VERIFY(owner.outgoing()[2].phase == DispatchController::Phase::Active &&
+                    owner.outgoing()[2].frozenAt < 0 && !pet->entering());
+        QCOMPARE(localHides, 1);
+        QVERIFY(hiddenBeforeActivate);
+        QVERIFY(home.contains(owner.savedPosition(2)));
+        owner.recallPet(2);
+        QCOMPARE(owner.outgoing()[2].phase, DispatchController::Phase::LeavingRemote);
+        pair.a->disconnectPeer(pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing()[2].frozenAt >= 0 && guest.visitors()[dispatchId].frozen);
+        QCOMPARE(owner.outgoing()[2].phase, DispatchController::Phase::LeavingRemote);
+        QVERIFY(owner.isAway(2));
+        owner.recallPet(2); // An offline recall must not create a local copy.
+        QVERIFY(owner.isAway(2));
+        pair.time += 1000;
+        pair.a->refresh(); pair.b->refresh();
+        QTRY_VERIFY(pair.connected());
+        QTRY_VERIFY(owner.outgoing().isEmpty());
+        QCOMPARE(remoteHides, 1);
+        QVERIFY(hiddenBeforeReturn);
+        QVERIFY(pet->entering());
+        QCOMPARE(pet->area, home);
+        QTRY_VERIFY(!pet->entering());
+
+        owner.dispatchPets({2}, pair.b->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::Active && !pet->entering());
+        cutAtTerminal = true;
+        owner.recallPet(2);
+        QTRY_VERIFY(terminalWasCut);
+        QVERIFY(owner.isAway(2));
+        QCOMPARE(owner.outgoing()[2].phase, DispatchController::Phase::AwaitingHidden);
+        pair.time += 1000;
+        pair.a->refresh(); pair.b->refresh();
+        QTRY_VERIFY(pair.connected());
+        QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());
+        QCOMPARE(remoteHides, 2);
+        QVERIFY(hiddenBeforeReturn);
+        QTRY_VERIFY(!pet->entering());
+
+        // A normal service close drains both directions before closing its sockets.
+        target.spawn(remote.center(), remote, 1, 1);
+        connect(&timer, &QTimer::timeout, this, [&] { target.advance(.04); });
+        owner.dispatchPets({2}, pair.b->deviceId());
+        guest.dispatchPets({2}, pair.a->deviceId());
+        QTRY_VERIFY(owner.outgoing().contains(2) && guest.outgoing().contains(2) &&
+                    owner.outgoing()[2].phase == DispatchController::Phase::Active &&
+                    guest.outgoing()[2].phase == DispatchController::Phase::Active);
+        owner.requestStop();
+        QVERIFY(owner.stoppingService());
+        QVERIFY(pair.a->running());
+        QTRY_VERIFY(!pair.a->running());
+        QVERIFY(owner.outgoing().isEmpty() && owner.visitors().isEmpty());
+        QTRY_VERIFY(guest.outgoing().isEmpty() && guest.visitors().isEmpty());
+        QCOMPARE(source.totalCount(), 2);
+        QCOMPARE(target.totalCount(), 2);
+        timer.stop();
+        // Clear captures before the controllers' explicit shutdown/destruction.
+        owner.hideLocal = {}; guest.hideVisitor = {};
+        disconnect(&owner, nullptr, this, nullptr);
+        owner.shutdown(); guest.shutdown();
+    }
+    void batchTransitionsPreserveOwnershipAndCapacity() {
+        Pair pair;
+        const QRectF area(0, 0, 1280, 720);
+        SwarmController source(9, area.center(), area), target(10, area.center(), area);
+        source.spawn(area.center(), area, 1, 71);
+        target.setLimit(1);
+        DispatchController owner(*pair.a, source, [=] { return area; }, [&] { return pair.time; });
+        DispatchController guest(*pair.b, target, [=] { return area; }, [&] { return pair.time; });
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, this, [&] {
+            pair.time += 40;
+            owner.tick(); guest.tick(); source.advance(.04);
+        });
+        timer.start(10);
+        QVERIFY(pair.start());
+        QTRY_VERIFY(pair.connected());
+        QList<quint64> ids;
+        for (const auto &p : source.pets()) if (!p->primary) ids.append(p->id);
+        owner.dispatchPets(ids, pair.b->deviceId());
+        QTRY_COMPARE(owner.awayCount(), 71);
+        QTRY_COMPARE(guest.visitors().size(), 71);
+        QTRY_VERIFY(std::all_of(owner.outgoing().cbegin(), owner.outgoing().cend(),
+            [](const auto &o) { return o.phase == DispatchController::Phase::Active && o.frozenAt < 0; }));
+        QCOMPARE(source.totalCount(), 72);
+        QCOMPARE(target.totalCount(), 1);
+        owner.recallAll();
+        QTRY_VERIFY(owner.outgoing().isEmpty() && guest.visitors().isEmpty());
+        QCOMPARE(source.totalCount(), 72);
+        QCOMPARE(target.totalCount(), 1);
+        QVERIFY(source.find(1)->primary);
+        for (const auto &p : source.pets()) {
+            QVERIFY(!owner.isAway(p->id));
+            QVERIFY(p->motionGroup.isEmpty());
+        }
+        timer.stop();
+        owner.shutdown(); guest.shutdown();
     }
     void identityPersistenceAndErrors() {
         QTemporaryDir dir;
