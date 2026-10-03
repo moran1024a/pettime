@@ -58,8 +58,9 @@ QPointF exitTarget(QPointF position, QRectF area, int edge) {
 } // namespace
 
 PetModel::PetModel(std::uint32_t seed, QPointF center, QRectF bounds, bool young)
-    : position(center), area(bounds), juvenile(young), rng_(seed) {
+    : position(center), area(bounds), juvenile(young), rng_(seed), growthRng_(seed ^ 0x9e3779b9U) {
     growth_ = young ? 0 : 100;
+    growthDuration_ = young ? nextGrowthDuration() : 0;
     scale = growthScale(growth_);
     nextSpecial_ = young ? random(1.8, 4.2) : random(20, 50);
     setArea(bounds);
@@ -89,8 +90,11 @@ void PetModel::addGrowth(double amount) {
     juvenile = growth_ < 100;
     scale = growthScale(growth_);
 }
+double PetModel::nextGrowthDuration() {
+    return std::uniform_int_distribution<int>(1800, 3600)(growthRng_);
+}
 void PetModel::feedingGrowth() {
-    addGrowth(std::uniform_int_distribution<int>(1, 5)(rng_));
+    addGrowth(std::uniform_int_distribution<int>(5, 15)(growthRng_) / 10.0);
 }
 bool PetModel::frontal() const {
     return !juvenile && crashQueued &&
@@ -164,26 +168,11 @@ QString PetModel::displayName() const {
                                   : customName;
 }
 bool PetModel::playFeeding() {
-    if (!active() || dispatchPaused || dispatchLocked || transitioning() || mealActive ||
-        cosmeticFeeding || frontal())
+    if (!juvenile || !active() || expired || splitReady || dispatchPaused || dispatchLocked ||
+        transitioning() || cosmeticFeeding || frontal())
         return false;
     cosmeticFeeding = true;
     cosmeticAge = 0;
-    return true;
-}
-bool PetModel::feed() {
-    if (mealActive || cosmeticFeeding || dispatchPaused || dispatchLocked || transitioning() ||
-        !active())
-        return false;
-    mealActive = true;
-    eating = false;
-    mealAge_ = eatingAge_ = 0;
-    mealGain_ = 3 + static_cast<int>(random(0, 3));
-    mealPosition = clampPoint(position + direction(heading) * 83, area, 75 * scale);
-    crashQueued = manualPounce = false;
-    enter(State::Food, 25);
-    targetSpeed_ = random(35, 55);
-    desired_ = angle(mealPosition - position);
     return true;
 }
 void PetModel::startFlight(bool front, bool manual) {
@@ -222,6 +211,7 @@ void PetModel::becomeNymph() {
     ++generation;
     scale = MinimumScale;
     growth_ = 0;
+    growthDuration_ = nextGrowthDuration();
     cosmeticFeeding = mealActive = eating = false;
     splitReady = false;
     enter(State::Probe, random(.55, 1.4));
@@ -360,20 +350,21 @@ void PetModel::updateManual(double dt) {
 
 void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors) {
     impact = false;
-    if (!std::isfinite(dt) || dt <= 0 || expired || splitReady)
+    if (!std::isfinite(dt) || dt <= 0 || dispatchPaused || expired || splitReady)
         return;
     // Lifetime and growth are independent; frozen dispatch simulation does not advance.
     age += dt;
     sinceEvade_ += dt;
     if (sinceEvade_ >= 5)
         evadeCount = 0;
-    if (active())
-        addGrowth(dt * (100.0 / 360));
+    if (active() && juvenile)
+        addGrowth(dt * (100.0 / growthDuration_));
     if (cosmeticFeeding) {
         cosmeticAge += dt;
         if (cosmeticAge >= 2.65) {
             cosmeticFeeding = false;
             feedingGrowth();
+            ++feedingCompletions_;
         }
         previousCursor_ = cursor;
         haveCursor_ = true;
@@ -417,37 +408,7 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
 }
 
 void PetModel::updatePrimary(double dt, QPointF cursor) {
-    if (mealActive) {
-        mealAge_ += dt;
-        if (!eating && mealAge_ > 25) {
-            mealActive = false;
-            chooseBehavior();
-        } else if (!eating) {
-            const double distance = length(mealPosition - position);
-            desired_ = angle(mealPosition - position);
-            if (distance < 31) {
-                eating = true;
-                eatingAge_ = 0;
-                speed = targetSpeed_ = 0;
-            } else
-                targetSpeed_ = std::min(78.0, distance * 1.25);
-        } else {
-            targetSpeed_ = 0;
-            eatingAge_ += dt;
-            if (eatingAge_ >= 1.15) {
-                affection = std::min(100, affection + mealGain_);
-                feedingGrowth();
-                mealActive = eating = false;
-                enter(State::Happy, affection < 20   ? 1.5
-                                    : affection < 50 ? 2.1
-                                    : affection < 80 ? 2.8
-                                                     : 3.5);
-                speed = targetSpeed_ = 0;
-                desired_ = heading;
-                nextSpecial_ = random(12, 26);
-            }
-        }
-    } else if (actionAge >= actionDuration) {
+    if (actionAge >= actionDuration) {
         switch (state) {
         case State::Launch:
             enter(State::Flight, flightDuration);
@@ -493,7 +454,7 @@ void PetModel::updatePrimary(double dt, QPointF cursor) {
     const QPointF away = position - cursor;
     const QPointF cursorDelta = cursor - previousCursor_;
     const double mouseMove = std::abs(cursorDelta.x()) + std::abs(cursorDelta.y());
-    if (haveCursor_ && !mealActive && !frontal() && length(away) < 100 && mouseMove > 3 &&
+    if (haveCursor_ && !frontal() && length(away) < 100 && mouseMove > 3 &&
         cooldown_ <= 0) {
         ++evadeCount;
         sinceEvade_ = 0;

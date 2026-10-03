@@ -2,11 +2,13 @@
 #include "AnimationLibrary.h"
 #include "CrackWindow.h"
 #include "DispatchController.h"
+#include "FoodInventory.h"
 #include "NetworkPanel.h"
 #include "PetWindow.h"
 #include "SettingsStore.h"
 #include "SwarmController.h"
 #include <QDialog>
+#include <QComboBox>
 #include <QElapsedTimer>
 #include <QMenu>
 #include <QObject>
@@ -36,12 +38,18 @@ class ApplicationController : public QObject {
 
   private:
     friend class DispatchTest;
+    friend class FoodApplicationTest;
     bool eventFilter(QObject *object, QEvent *event) override;
     void stopControl();
     void clearControlKeys();
     void validateControl();
     bool canStartControl(quint64 id) const;
     bool canFeedPet(quint64 id) const;
+    bool useFood(quint64 id);
+    bool settleFood(quint64 removing = 0);
+    void showFood(quint64 id = 0);
+    void refreshFood();
+    void setBottomMode(bool enabled);
     bool canDispatchPet(quint64 id) const;
     void tick();
     void makeMenu();
@@ -66,6 +74,8 @@ class ApplicationController : public QObject {
     SettingsStore store_;
     RunOptions options_;
     SwarmController swarm_;
+    FoodInventory food_;
+    QHash<quint64, quint64> feedingSerials_;
     PetModel &primary_;
     PetWindow mainWindow_;
     CrackWindow crack_;
@@ -75,9 +85,13 @@ class ApplicationController : public QObject {
     std::map<QString, std::unique_ptr<PetWindow>> visitorWindows_;
     std::unique_ptr<NetworkPanel> networkPanel_;
     std::unique_ptr<QDialog> petDialog_;
+    std::unique_ptr<QDialog> foodDialog_;
+    QComboBox *foodTarget_ = nullptr;
+    QLabel *foodStock_ = nullptr, *foodReason_ = nullptr;
+    QPushButton *foodUse_ = nullptr;
     QTableWidget *petTable_ = nullptr;
     QLabel *petCount_ = nullptr, *dispatchStatus_ = nullptr;
-    QPushButton *renamePet_ = nullptr, *highlightPet_ = nullptr, *feedPet_ = nullptr;
+    QPushButton *renamePet_ = nullptr, *highlightPet_ = nullptr, *foodPet_ = nullptr;
     QPushButton *dispatchPet_ = nullptr, *recallPet_ = nullptr, *recallAllPets_ = nullptr;
     QPushButton *clearPet_ = nullptr;
     QPushButton *expelPet_ = nullptr;
@@ -90,13 +104,15 @@ class ApplicationController : public QObject {
     std::uint64_t contextPet_ = 1;
     QMenu menu_;
     QSystemTrayIcon tray_;
-    QAction *pause_ = nullptr, *affection_ = nullptr, *feed_ = nullptr, *demo_ = nullptr,
+    QAction *pause_ = nullptr, *affection_ = nullptr, *demo_ = nullptr,
             *retry_ = nullptr, *limitAction_ = nullptr;
+    QAction *bottomAction_ = nullptr;
     QTimer timer_;
     QElapsedTimer clock_;
     double last_ = 0, lastSwarm_ = 0, nextSwarm_ = 0, nextVisitors_ = 0, retryAt_ = 0;
     double nextSave_ = 5;
     bool restoreNetwork_ = false;
+    bool bottomMode_ = false;
     double totalTickMs_ = 0, maxTickMs_ = 0;
     int ticks_ = 0, swarmUpdates_ = 0, recalls_ = 0, impacts_ = 0;
     bool dirty_ = false, saveWarning_ = false, smokePounce_ = false;

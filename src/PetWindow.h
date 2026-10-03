@@ -16,6 +16,8 @@ class PetWindow : public QWidget {
     void presentRemote(const PetRenderState &state, const QString &name, bool frozen);
     void highlight();
     void hidePet();
+    void setBottomMode(bool enabled);
+    bool bottomMode() const { return bottomMode_; }
     const QImage &image() const { return image_; }
     int paintedFrames() const { return painted_; }
     static QRegion inputRegion(const QImage &image, QSize logicalSize);
@@ -37,6 +39,7 @@ class PetWindow : public QWidget {
     PetRenderState remote_;
     QString remoteName_;
     bool frozen_ = false;
+    bool bottomMode_ = false;
     qint64 highlightElapsed_ = 0;
     const AnimationLibrary &animation_;
     QImage image_;

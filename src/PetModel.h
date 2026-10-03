@@ -32,7 +32,6 @@ class PetModel {
   public:
     PetModel(std::uint32_t seed, QPointF center, QRectF area, bool juvenile = false);
     void advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors = {});
-    bool feed();
     void beginEntry(QRectF bounds, int edge, double fraction);
     bool beginExit();
     void cancelTransition();
@@ -69,6 +68,8 @@ class PetModel {
     static double growthScale(double growth);
     static QString growthState(double growth);
     double growth() const { return growth_; }
+    double growthDuration() const { return growthDuration_; }
+    quint64 feedingCompletions() const { return feedingCompletions_; }
     bool frontal() const;
     bool active() const { return state != State::Crush && state != State::Fade; }
     double progress() const;
@@ -90,6 +91,9 @@ class PetModel {
   private:
     friend class SwarmController;
     double growth_ = 100;
+    double growthDuration_ = 0;
+    quint64 feedingCompletions_ = 0;
+    double nextGrowthDuration();
     void addGrowth(double amount);
     void feedingGrowth();
     enum class Transition { None, Entry, Exit };
@@ -110,10 +114,10 @@ class PetModel {
     void updateClone(double dt, const std::vector<QPointF> &neighbors);
     void move(double dt, double margin, double turnRate, bool smoothCorner = true);
     std::mt19937 rng_;
+    std::mt19937 growthRng_;
     double desired_ = -Pi / 2, targetSpeed_ = 32, turnNoise_ = 0;
     double cooldown_ = 0, sinceEvade_ = 10, nextSpecial_ = 30, revealLeft_ = 0;
-    double mealAge_ = 0, eatingAge_ = 0, nextTurn_ = 0;
-    int mealGain_ = 0;
+    double nextTurn_ = 0;
     QPointF previousCursor_, roamGoal_;
     bool haveCursor_ = false;
 };

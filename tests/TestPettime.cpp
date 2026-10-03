@@ -21,21 +21,20 @@ class TestPettime : public QObject {
     Q_OBJECT
   private slots:
     void initTestCase() { animation_ = std::make_unique<AnimationLibrary>(); }
-    void feedingSavesOnlyAfterEating() {
-        PetModel p(5, {500, 500}, {0, 0, 1000, 1000});
-        QVERIFY(p.feed());
-        QVERIFY(!p.feed());
-        QCOMPARE(p.affection, 0);
-        for (int i = 0; i < 1500 && p.mealActive; ++i)
-            p.advance(.02, {-1000, -1000});
-        QVERIFY(!p.mealActive);
-        QVERIFY(p.affection >= 3 && p.affection <= 5);
-        QCOMPARE(p.state, State::Happy);
+    void feedingCompletesOnlyAfterAnimation() {
+        PetModel p(5, {500, 500}, {0, 0, 1000, 1000}, true);
         p.affection = 99;
-        QVERIFY(p.feed());
-        for (int i = 0; i < 1500 && p.mealActive; ++i)
-            p.advance(.02, {-1000, -1000});
-        QCOMPARE(p.affection, 100);
+        QVERIFY(p.playFeeding());
+        QVERIFY(!p.playFeeding());
+        p.advance(2.64, {});
+        QVERIFY(p.cosmeticFeeding);
+        QCOMPARE(p.feedingCompletions(), quint64(0));
+        p.advance(.02, {});
+        QVERIFY(!p.cosmeticFeeding);
+        QCOMPARE(p.feedingCompletions(), quint64(1));
+        QCOMPARE(p.affection, 99);
+        p.advance(1, {});
+        QCOMPARE(p.feedingCompletions(), quint64(1));
     }
     void pausedFlightFreezesFrame() {
         PetModel p(7, {500, 500}, {0, 0, 1000, 1000});
@@ -60,18 +59,17 @@ class TestPettime : public QObject {
         }
         QVERIFY(impact);
     }
-    void feedingAtEdgeAndMenuPause() {
-        PetModel p(4, {20, 20}, {0, 0, 800, 600});
-        QVERIFY(p.feed());
+    void feedingAtEdgeWhileMenuOpen() {
+        PetModel p(4, {20, 20}, {0, 0, 800, 600}, true);
         p.menuOpen = true;
-        for (int i = 0; i < 2000; ++i)
+        QVERIFY(p.playFeeding());
+        const auto position = p.position;
+        for (int i = 0; i < 133; ++i)
             p.advance(.02, {});
-        QVERIFY(p.mealActive);
+        QVERIFY(!p.cosmeticFeeding);
+        QCOMPARE(p.feedingCompletions(), quint64(1));
+        QCOMPARE(p.position, position);
         QCOMPARE(p.affection, 0);
-        p.menuOpen = false;
-        for (int i = 0; i < 1500 && p.mealActive; ++i)
-            p.advance(.02, {-1000, -1000});
-        QVERIFY(p.affection >= 3);
     }
     void growthBoundaries() {
         QCOMPARE(PetModel::growthScale(-1), MinimumScale);
@@ -83,13 +81,15 @@ class TestPettime : public QObject {
     void growthMaturesIndependentlyOfLifetime() {
         PetModel p(3, {500, 500}, {0, 0, 1000, 1000}, true);
         QCOMPARE(p.growth(), 0.0);
+        const auto duration = p.growthDuration();
+        QVERIFY(duration >= 1800 && duration <= 3600);
         p.age = 10000;
-        p.advance(89, {});
+        p.advance(duration * .249, {});
         QVERIFY(p.growth() < 25);
         QCOMPARE(PetModel::growthState(p.growth()), QString("幼体"));
-        p.advance(1, {});
+        p.advance(duration * .001, {});
         QCOMPARE(PetModel::growthState(p.growth()), QString("成长中"));
-        p.advance(270, {});
+        p.advance(duration * .75, {});
         QCOMPARE(p.growth(), 100.0);
         QVERIFY(!p.juvenile);
         QCOMPARE(p.scale, AdultScale);
@@ -108,33 +108,52 @@ class TestPettime : public QObject {
         QCOMPARE(p.growth(), 0.0);
         QCOMPARE(p.scale, MinimumScale);
         QVERIFY(p.juvenile);
+        QVERIFY(p.growthDuration() >= 1800 && p.growthDuration() <= 3600);
+    }
+    void growthRandomnessIsIndependentOfMovement() {
+        QSet<int> durations;
+        for (int seed = 1; seed <= 80; ++seed) {
+            PetModel p(seed, {500, 500}, {0, 0, 1000, 1000}, true);
+            QVERIFY(p.growthDuration() >= 1800 && p.growthDuration() <= 3600);
+            durations.insert(int(p.growthDuration()));
+            PetModel q = p;
+            for (int i = 0; i < seed; ++i)
+                q.random(0, 1);
+            QVERIFY(p.playFeeding());
+            QVERIFY(q.playFeeding());
+            p.advance(2.65, {});
+            q.advance(2.65, {});
+            QCOMPARE(q.growth(), p.growth());
+            p.becomeNymph();
+            q.becomeNymph();
+            QCOMPARE(q.growthDuration(), p.growthDuration());
+            QCOMPARE(p.feedingCompletions(), quint64(1));
+        }
+        QVERIFY(durations.size() > 1);
     }
     void feedingGrowthIsLocalRandomAndOnce() {
         QSet<int> bonuses;
-        for (int seed = 1; seed <= 40; ++seed) {
+        for (int seed = 1; seed <= 160; ++seed) {
             PetModel p(seed, {500, 500}, {0, 0, 1000, 1000}, true);
             PetModel other = p;
             QVERIFY(p.playFeeding());
             p.advance(2.65, {});
-            const double bonus = p.growth() - 2.65 * 100 / 360;
-            QVERIFY(std::abs(bonus - std::round(bonus)) < 1e-9);
-            QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
-            bonuses.insert(qRound(bonus));
+            const double bonus = p.growth() - 2.65 * 100 / p.growthDuration();
+            QVERIFY(std::abs(bonus * 10 - std::round(bonus * 10)) < 1e-9);
+            QVERIFY(bonus >= .5 - 1e-9 && bonus <= 1.5 + 1e-9);
+            bonuses.insert(qRound(bonus * 10));
             QCOMPARE(other.growth(), 0.0);
             QCOMPARE(p.affection, 0);
+            QCOMPARE(p.feedingCompletions(), quint64(1));
             const auto grown = p.growth();
             p.advance(.1, {});
-            QVERIFY(std::abs(p.growth() - grown - .1 * 100 / 360) < 1e-9);
+            QVERIFY(std::abs(p.growth() - grown - .1 * 100 / p.growthDuration()) < 1e-9);
+            QCOMPARE(p.feedingCompletions(), quint64(1));
         }
-        QCOMPARE(bonuses.size(), 5);
-        PetModel p(4, {500, 500}, {0, 0, 1000, 1000}, true);
-        QVERIFY(p.feed());
-        for (int i = 0; i < 1500 && p.mealActive; ++i)
-            p.advance(.02, {-1000, -1000});
-        QVERIFY(!p.mealActive);
-        QVERIFY(p.affection >= 3 && p.affection <= 5);
-        const double bonus = p.growth() - p.age * 100 / 360;
-        QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
+        QCOMPARE(bonuses.size(), 11);
+        PetModel adult(4, {500, 500}, {0, 0, 1000, 1000});
+        QVERIFY(!adult.playFeeding());
+        QCOMPARE(adult.feedingCompletions(), quint64(0));
     }
     void feedingCancellationFreezeAndCap() {
         PetModel p(5, {500, 500}, {0, 0, 1000, 1000}, true);
@@ -144,36 +163,44 @@ class TestPettime : public QObject {
         p.crush();
         p.advance(1.1, {});
         QCOMPARE(p.growth(), natural);
+        QCOMPARE(p.feedingCompletions(), quint64(0));
         p.becomeNymph();
-        QVERIFY(p.feed());
-        p.crush();
-        p.advance(1.1, {});
-        QCOMPARE(p.growth(), 0.0);
+        QVERIFY(p.playFeeding());
+        p.advance(2.65, {});
+        QCOMPARE(p.feedingCompletions(), quint64(1));
         QCOMPARE(p.affection, 0);
         p.becomeNymph();
-        p.advance(355, {});
+        QCOMPARE(p.feedingCompletions(), quint64(1));
+        p.advance(p.growthDuration() - 2, {});
         QVERIFY(p.playFeeding());
         p.advance(2.65, {});
         QCOMPARE(p.growth(), 100.0);
         QVERIFY(!p.juvenile);
+        QVERIFY(!p.playFeeding());
+        QCOMPARE(p.feedingCompletions(), quint64(2));
         SwarmController swarm(8);
         swarm.spawn({400, 400}, {0, 0, 1000, 1000}, 1, 1);
         auto *child = swarm.find(2);
         QVERIFY(child->playFeeding());
         child->dispatchPaused = true;
+        child->advance(20, {}); // Direct model callers must honor the same freeze.
         swarm.advance(20);
         QCOMPARE(child->growth(), 0.0);
         QCOMPARE(child->cosmeticAge, 0.0);
+        QCOMPARE(child->age, 0.0);
+        QCOMPARE(child->feedingCompletions(), quint64(0));
+        QVERIFY(child->cosmeticFeeding);
         QVERIFY(!child->playFeeding());
         child->dispatchPaused = false;
         swarm.advance(2.65);
-        QVERIFY(child->growth() >= 1);
+        QVERIFY(child->growth() >= .5);
+        QCOMPARE(child->feedingCompletions(), quint64(1));
     }
     void matureChildSplitsIntoMinimumGrowthChildren() {
         SwarmController swarm(3);
         swarm.spawn({400, 400}, {0, 0, 1000, 1000}, 1, 1);
         auto *p = swarm.find(2);
-        p->advance(360, {});
+        p->advance(p->growthDuration(), {});
         QVERIFY(!p->juvenile);
         QVERIFY(!p->primary);
         p->crush();
@@ -283,13 +310,12 @@ class TestPettime : public QObject {
     }
     void listFeedingPreservesAffectionAndAction() {
         for (bool isPrimary : {false, true}) {
-            PetModel p(9, {500, 500}, {0, 0, 1000, 1000}, !isPrimary);
+            PetModel p(9, {500, 500}, {0, 0, 1000, 1000}, true);
             p.primary = isPrimary;
             p.affection = 38;
             const PetModel before = p;
             QVERIFY(p.playFeeding());
             QVERIFY(!p.playFeeding());
-            QVERIFY(!p.feed());
             for (int i = 0; i < 133; ++i)
                 p.advance(.02, {});
             QVERIFY(!p.cosmeticFeeding);
@@ -300,10 +326,9 @@ class TestPettime : public QObject {
             QCOMPARE(p.generation, before.generation);
             QCOMPARE(p.splitReady, false);
             QVERIFY(p.age > before.age); // Natural growth still uses wall time.
-            if (!isPrimary) {
-                const double bonus = p.growth() - (p.age - before.age) * 100 / 360;
-                QVERIFY(bonus >= 1 - 1e-9 && bonus <= 5 + 1e-9);
-            }
+            const double bonus = p.growth() - (p.age - before.age) * 100 / p.growthDuration();
+            QVERIFY(bonus >= .5 - 1e-9 && bonus <= 1.5 + 1e-9);
+            QCOMPARE(p.feedingCompletions(), quint64(1));
             p.crush();
             QVERIFY(!p.playFeeding());
         }
@@ -336,14 +361,14 @@ class TestPettime : public QObject {
         QCOMPARE(table->rowCount(), 3);
         QCOMPARE(table->currentRow(), 0);
         QCOMPARE(table->item(0, 1)->text(), QSysInfo::machineHostName());
-        QPushButton *rename = nullptr, *feed = nullptr;
+        QPushButton *rename = nullptr, *food = nullptr;
         for (auto *button : dialog->findChildren<QPushButton *>()) {
             if (button->text() == "重命名")
                 rename = button;
-            if (button->text() == "投喂")
-                feed = button;
+            if (button->text() == "食物…")
+                food = button;
         }
-        QVERIFY(rename && feed);
+        QVERIFY(rename && food);
         QVERIFY(!rename->isEnabled());
         table->selectRow(1);
         QVERIFY(rename->isEnabled());
@@ -356,9 +381,17 @@ class TestPettime : public QObject {
         });
         rename->click();
         QCOMPARE(table->item(1, 1)->text(), QString("测试小强"));
-        feed->click();
+        food->click();
+        QDialog *foodDialog = nullptr;
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (widget->windowTitle() == "食物面板")
+                foodDialog = qobject_cast<QDialog *>(widget);
+        QVERIFY(foodDialog);
+        auto *use = foodDialog->findChild<QPushButton *>("useBreadcrumb");
+        QVERIFY(use && use->isEnabled());
+        use->click();
         QCOMPARE(table->item(1, 3)->text(), QString("投喂动画"));
-        QVERIFY(!feed->isEnabled());
+        QVERIFY(!use->isEnabled());
         QTimer::singleShot(0, [] {
             for (auto *widget : QApplication::topLevelWidgets())
                 if (auto *input = qobject_cast<QInputDialog *>(widget)) {
@@ -369,7 +402,7 @@ class TestPettime : public QObject {
         limitAction->trigger();
         QCOMPARE(table->rowCount(), 1);
         QCOMPARE(table->currentRow(), -1);
-        QVERIFY(!feed->isEnabled());
+        QVERIFY(!food->isEnabled());
         QCOMPARE(store.loadLimit(), 1);
         QCOMPARE(store.loadAffinity(), 0);
         listAction->trigger();
@@ -498,7 +531,6 @@ class TestPettime : public QObject {
             p.advance(10, {});
             QCOMPARE(p.position, endpoint);
             QCOMPARE(p.phase, phase);
-            QVERIFY(!p.feed());
             QVERIFY(!p.playFeeding());
             QVERIFY(!p.setManualControl(true));
             p.crush();
@@ -581,11 +613,11 @@ class TestPettime : public QObject {
         QCOMPARE(corner.position.x(), outsideCorner.x());
     }
     void transitionLocksActionsCancelsFeedingAndAllowsRetirement() {
-        for (bool cosmetic : {false, true}) {
+        {
             PetModel p(7, {500, 500}, {0, 0, 1000, 1000}, true);
             p.primary = false;
             QVERIFY(p.setManualControl(true));
-            QVERIFY(cosmetic ? p.playFeeding() : p.feed());
+            QVERIFY(p.playFeeding());
             p.advance(.2, {});
             p.dispatchLocked = true;
             QVERIFY(p.beginExit());
@@ -593,19 +625,18 @@ class TestPettime : public QObject {
             QVERIFY(!p.cosmeticFeeding);
             QVERIFY(!p.mealActive);
             QVERIFY(!p.eating);
-            QVERIFY(!p.feed());
             QVERIFY(!p.playFeeding());
             QVERIFY(!p.setManualControl(true));
             p.crush();
             QCOMPARE(p.state, State::Probe);
             p.advance(3, {});
             QVERIFY(p.exitComplete());
-            QVERIFY(std::abs(p.growth() - p.age * 100 / 360) < 1e-9);
+            QVERIFY(std::abs(p.growth() - p.age * 100 / p.growthDuration()) < 1e-9);
             QCOMPARE(p.affection, 0);
+            QCOMPARE(p.feedingCompletions(), quint64(0));
             p.cancelTransition();
             QVERIFY(!p.transitioning());
             QVERIFY(p.dispatchLocked);
-            QVERIFY(!p.feed());
             QVERIFY(!p.playFeeding());
             QVERIFY(!p.setManualControl(true));
             p.crush();
@@ -625,6 +656,7 @@ class TestPettime : public QObject {
             QCOMPARE(p.state, State::Fade);
             p.advance(.4, {});
             QVERIFY(p.expired);
+            QCOMPARE(p.feedingCompletions(), quint64(0));
         }
         PetModel rejected(7, {500, 500}, {0, 0, 1000, 1000});
         QVERIFY(!rejected.beginExit());
@@ -708,10 +740,10 @@ class TestPettime : public QObject {
         p->dispatchPaused = false;
         swarm.advance(1);
         QVERIFY(p->exitComplete());
-        QVERIFY(std::abs(p->growth() - 1.2 * 100 / 360) < 1e-9);
+        QVERIFY(std::abs(p->growth() - 1.2 * 100 / p->growthDuration()) < 1e-9);
         const auto grown = p->growth();
         swarm.advance(.2);
-        QVERIFY(std::abs(p->growth() - grown - .2 * 100 / 360) < 1e-9);
+        QVERIFY(std::abs(p->growth() - grown - .2 * 100 / p->growthDuration()) < 1e-9);
     }
     void animationFrames() {
         QCOMPARE(animation_->walk.size(), std::size_t(72));
@@ -740,7 +772,7 @@ class TestPettime : public QObject {
             QVERIFY(region.contains({160, 160}));
         }
         p.becomeNymph();
-        p.advance(360, {});
+        p.advance(p.growthDuration(), {});
         QVERIFY(!p.juvenile);
         for (int i = 0; i < 36; ++i) {
             p.heading = i * Pi / 18;
@@ -780,8 +812,10 @@ class TestPettime : public QObject {
         QCOMPARE(restored.primary().displayName(), QSysInfo::machineHostName());
         QCOMPARE(restored.primary().affection, 67);
         QCOMPARE(restored.primary().growth(), 0.0);
+        QCOMPARE(restored.primary().growthDuration(), swarm.primary().growthDuration());
         QCOMPARE(restored.find(2)->customName, child->customName);
         QCOMPARE(restored.find(2)->growth(), child->growth());
+        QCOMPARE(restored.find(2)->growthDuration(), child->growthDuration());
         QCOMPARE(restored.find(2)->generation, 3);
         QCOMPARE(restored.find(2)->age, child->age);
         QCOMPARE(restored.find(2)->affection, 12);
@@ -830,6 +864,39 @@ class TestPettime : public QObject {
         restored.restoreProgress({{"pets", QJsonArray{}}});
         QCOMPARE(restored.totalCount(), 1);
         QVERIFY(restored.primary().primary);
+    }
+    void growthDurationMigrationKeepsProgressAndAdults() {
+        SwarmController swarm(14);
+        const QJsonArray pets{
+            QJsonObject{{"id", "1"}, {"growth", 25}, {"age", 5000}},
+            QJsonObject{{"id", "2"}, {"growth", 75}, {"growthDuration", 2400}},
+            QJsonObject{{"id", "3"}, {"growth", 100}, {"scale", .9}},
+            QJsonObject{{"id", "4"}, {"growth", 10}, {"growthDuration", -1}},
+            QJsonObject{{"id", "5"}, {"growth", 20}, {"growthDuration", 3601}},
+            QJsonObject{{"id", "6"}, {"growth", 30}, {"growthDuration", "invalid"}}};
+        swarm.restoreProgress({{"pets", pets}});
+        QCOMPARE(swarm.primary().growth(), 25.0);
+        QCOMPARE(swarm.primary().age, 5000.0);
+        QCOMPARE(swarm.find(2)->growth(), 75.0);
+        QCOMPARE(swarm.find(2)->growthDuration(), 2400.0);
+        QCOMPARE(swarm.find(3)->growth(), 100.0);
+        QCOMPARE(swarm.find(3)->scale, .9);
+        QVERIFY(!swarm.find(3)->playFeeding());
+        for (quint64 id : {1, 4, 5, 6}) {
+            auto *p = swarm.find(id);
+            QVERIFY(p->growthDuration() >= 1800 && p->growthDuration() <= 3600);
+            const double before = p->growth();
+            p->advance(1, {});
+            QVERIFY(std::abs(p->growth() - before - 100 / p->growthDuration()) < 1e-9);
+        }
+        SwarmController restarted(99);
+        restarted.restoreProgress(swarm.saveProgress());
+        for (const auto &p : swarm.pets()) {
+            QCOMPARE(restarted.find(p->id)->growth(), p->growth());
+            QCOMPARE(restarted.find(p->id)->growthDuration(), p->growthDuration());
+        }
+        restarted.find(2)->advance(600, {});
+        QCOMPARE(restarted.find(2)->growth(), 100.0);
     }
     void storageFailureAndRecovery() {
         QTemporaryDir dir;

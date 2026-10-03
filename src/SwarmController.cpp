@@ -19,6 +19,7 @@ QJsonObject SwarmController::saveProgress() const {
             continue;
         pets.append(QJsonObject{{"id", QString::number(p->id)}, {"name", p->customName},
             {"growth", p->growth()}, {"growthState", PetModel::growthState(p->growth())},
+            {"growthDuration", p->growthDuration()},
             {"affection", p->affection}, {"generation", p->generation}, {"age", p->age},
             {"scale", p->scale}, {"x", p->position.x()}, {"y", p->position.y()},
             {"heading", p->heading}});
@@ -61,6 +62,9 @@ void SwarmController::restoreProgress(const QJsonObject &object) {
         restored->customName = id == 1 ? QString{} : data.value("name").toString().trimmed().left(64);
         restored->growth_ = number(data, "growth", id == 1 ? 100 : 0, 0, 100);
         restored->juvenile = restored->growth_ < 100;
+        const double duration = data.value("growthDuration").toDouble(0);
+        restored->growthDuration_ = std::isfinite(duration) && duration >= 1800 && duration <= 3600
+            ? duration : restored->juvenile ? restored->nextGrowthDuration() : 0;
         restored->scale = restored->juvenile ? PetModel::growthScale(restored->growth_)
             : number(data, "scale", AdultScale, MinimumScale, 1);
         restored->affection = int(number(data, "affection", 0, 0, 100));

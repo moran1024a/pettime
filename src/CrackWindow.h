@@ -10,6 +10,8 @@ class CrackWindow : public QWidget {
     explicit CrackWindow(std::uint32_t seed = 1);
     void trigger(QPointF center);
     void advance(double dt);
+    void setBottomMode(bool enabled);
+    bool bottomMode() const { return bottomMode_; }
 
   protected:
     void paintEvent(QPaintEvent *) override;
@@ -22,6 +24,7 @@ class CrackWindow : public QWidget {
     std::vector<Fracture> fractures_;
     std::mt19937 rng_;
     double age_ = 2;
+    bool bottomMode_ = false;
     double random(double low, double high);
 };
 } // namespace pettime

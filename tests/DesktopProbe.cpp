@@ -11,6 +11,7 @@
 #include <QMouseEvent>
 #include <QScreen>
 #include <QTemporaryDir>
+#include <QWindow>
 #include <QtTest>
 #include <cmath>
 
@@ -35,23 +36,60 @@ int main(int argc, char **argv) {
         qCritical() << "This probe requires QT_QPA_PLATFORM=xcb and an X11 desktop.";
         return 2;
     }
-    QLibrary x11("libX11.so.6"), xtst("libXtst.so.6");
+    QLibrary x11("libX11.so.6"), xtst("libXtst.so.6"), xext("libXext.so.6");
     auto open = reinterpret_cast<void *(*)(const char *)>(x11.resolve("XOpenDisplay"));
     auto close = reinterpret_cast<int (*)(void *)>(x11.resolve("XCloseDisplay"));
     auto flush = reinterpret_cast<int (*)(void *)>(x11.resolve("XFlush"));
     auto focus =
         reinterpret_cast<int (*)(void *, unsigned long *, int *)>(x11.resolve("XGetInputFocus"));
+    auto rootWindow =
+        reinterpret_cast<unsigned long (*)(void *)>(x11.resolve("XDefaultRootWindow"));
+    auto queryTree = reinterpret_cast<int (*)(void *, unsigned long, unsigned long *,
+                                              unsigned long *, unsigned long **, unsigned int *)>(
+        x11.resolve("XQueryTree"));
+    auto internAtom = reinterpret_cast<unsigned long (*)(void *, const char *, int)>(
+        x11.resolve("XInternAtom"));
+    auto getProperty = reinterpret_cast<int (*)(void *, unsigned long, unsigned long, long, long,
+                                                int, unsigned long, unsigned long *, int *,
+                                                unsigned long *, unsigned long *, unsigned char **)>(
+        x11.resolve("XGetWindowProperty"));
+    auto freeData = reinterpret_cast<int (*)(void *)>(x11.resolve("XFree"));
+    auto shapeRectangles = reinterpret_cast<void *(*)(void *, unsigned long, int, int *, int *)>(
+        xext.resolve("XShapeGetRectangles"));
     auto motion = reinterpret_cast<int (*)(void *, int, int, int, unsigned long)>(
         xtst.resolve("XTestFakeMotionEvent"));
     auto button = reinterpret_cast<int (*)(void *, unsigned int, int, unsigned long)>(
         xtst.resolve("XTestFakeButtonEvent"));
-    if (!open || !close || !flush || !focus || !motion || !button) {
-        qCritical() << "X11/XTEST libraries unavailable";
+    if (!open || !close || !flush || !focus || !rootWindow || !queryTree || !internAtom ||
+        !getProperty || !freeData || !shapeRectangles || !motion || !button) {
+        qCritical() << "X11/XTEST/XShape libraries unavailable";
         return 2;
     }
     void *display = open(nullptr);
     if (!display)
         return 2;
+    const unsigned long root = rootWindow(display);
+    const unsigned long below = internAtom(display, "_NET_WM_STATE_BELOW", 1);
+    unsigned long type = 0, count = 0, remaining = 0;
+    int format = 0;
+    unsigned char *supported = nullptr;
+    const unsigned long supportedAtom = internAtom(display, "_NET_SUPPORTED", 1);
+    if (supportedAtom)
+        getProperty(display, root, supportedAtom, 0, 4096, 0, 0,
+                    &type, &format, &count, &remaining, &supported);
+    bool supportsBelow = false;
+    if (supported && format == 32) {
+        const auto *atoms = reinterpret_cast<const unsigned long *>(supported);
+        for (unsigned long i = 0; i < count; ++i)
+            supportsBelow |= below && atoms[i] == below;
+    }
+    if (supported)
+        freeData(supported);
+    if (!supportsBelow) {
+        qCritical() << "This probe requires an X11 window manager supporting _NET_WM_STATE_BELOW.";
+        close(display);
+        return 2;
+    }
     int failures = 0;
     auto check = [&](bool ok, const char *message) {
         if (!ok)
@@ -69,6 +107,53 @@ int main(int argc, char **argv) {
         button(display, 1, 0, 30);
         flush(display);
         QTest::qWait(100);
+    };
+    auto rootChild = [&](unsigned long window) {
+        for (int depth = 0; depth < 16; ++depth) {
+            unsigned long queryRoot = 0, parent = 0, *children = nullptr;
+            unsigned int childrenCount = 0;
+            const bool ok = queryTree(display, window, &queryRoot, &parent, &children,
+                                      &childrenCount);
+            if (children)
+                freeData(children);
+            if (!ok || !parent)
+                return 0UL;
+            if (parent == root)
+                return window;
+            window = parent;
+        }
+        return 0UL;
+    };
+    auto above = [&](QWidget &upper, QWidget &lower) {
+        // Flag changes recreate the QWindow. Qt 6.4 can leave QWidget::winId()
+        // referring to the destroyed native window, so query the current handle.
+        if (!upper.windowHandle() || !lower.windowHandle())
+            return false;
+        const auto upperFrame = rootChild(upper.windowHandle()->winId()),
+                   lowerFrame = rootChild(lower.windowHandle()->winId());
+        unsigned long queryRoot = 0, parent = 0, *children = nullptr;
+        unsigned int childrenCount = 0;
+        const bool ok = queryTree(display, root, &queryRoot, &parent, &children, &childrenCount);
+        int upperIndex = -1, lowerIndex = -1;
+        if (ok)
+            for (unsigned int i = 0; i < childrenCount; ++i) {
+                if (children[i] == upperFrame)
+                    upperIndex = int(i);
+                if (children[i] == lowerFrame)
+                    lowerIndex = int(i);
+            }
+        if (children)
+            freeData(children);
+        return upperIndex >= 0 && lowerIndex >= 0 && upperIndex > lowerIndex;
+    };
+    auto inputTransparent = [&](QWidget &window) {
+        int count = -1, ordering = 0;
+        // XShapeInput is 2; no X11 development headers are needed by this probe.
+        void *rectangles = shapeRectangles(display, window.windowHandle()->winId(), 2,
+                                          &count, &ordering);
+        if (rectangles)
+            freeData(rectangles);
+        return count == 0;
     };
     Underlay underlay;
     underlay.move(app.primaryScreen()->availableGeometry().center() - QPoint(450, 350));
@@ -107,6 +192,82 @@ int main(int argc, char **argv) {
     click(pet.mapToGlobal(QPoint(10, 10)));
     check(underlay.presses == beforeClick + 1, "highlight overlay passes native clicks");
 
+    unsigned long beforeModeFocus = 0;
+    focus(display, &beforeModeFocus, &revert);
+    const QRect beforeModeGeometry = pet.geometry();
+    const QPointF beforeModePosition = model.position;
+    const auto beforeModeState = model.state;
+    QSignalSpy bottomCrushed(&pet, &pettime::PetWindow::crushed);
+    pet.setBottomMode(true);
+    underlay.lower();
+    QTest::qWait(150);
+    check(pet.isVisible() && pet.geometry() == beforeModeGeometry,
+          "bottom mode keeps pet visible at its original geometry");
+    check(above(underlay, pet), "native stack places lowered ordinary window above bottom pet");
+    check(inputTransparent(pet), "bottom pet has an empty native input region");
+    QLabel *highlight = nullptr;
+    for (auto *widget : QApplication::topLevelWidgets())
+        if (auto *label = qobject_cast<QLabel *>(widget); label && label != &underlay &&
+                                                       label->text() == model.displayName())
+            highlight = label;
+    check(highlight && highlight->isVisible() && above(underlay, *highlight),
+          "native stack places highlight below ordinary window");
+    check(highlight && inputTransparent(*highlight), "bottom highlight has an empty input region");
+    pet.highlight();
+    QTest::qWait(80);
+    check(highlight && above(underlay, *highlight), "repeated highlight respects bottom mode");
+    focus(display, &afterFocus, &revert);
+    check(beforeModeFocus == afterFocus, "bottom mode switch does not steal keyboard focus");
+    // Lowering a normal window can expose unrelated applications. Restore the
+    // test background before sending input so native clicks stay in this fixture.
+    underlay.raise();
+    underlay.activateWindow();
+    check(QTest::qWaitForWindowActive(&underlay), "underlay active before bottom input checks");
+    QTest::qWait(80);
+    beforeClick = underlay.presses;
+    click(pet.mapToGlobal(body));
+    check(underlay.presses == beforeClick + 1 && model.position == beforeModePosition &&
+              !model.dragging,
+          "opaque bottom pet body passes native clicks to underlay");
+    click(pet.mapToGlobal(body));
+    click(pet.mapToGlobal(body));
+    check(model.position == beforeModePosition && model.state == beforeModeState &&
+              !model.dragging && bottomCrushed.count() == 0,
+          "bottom native clicks cannot drag or crush pet");
+    pet.setBottomMode(false);
+    QTest::qWait(150);
+    check(above(pet, underlay), "native stack restores pet above ordinary window");
+    check(highlight && inputTransparent(*highlight), "restored highlight remains input transparent");
+    focus(display, &afterFocus, &revert);
+    check(beforeModeFocus == afterFocus, "normal mode restoration does not steal keyboard focus");
+    QTest::qWait(app.doubleClickInterval() + 80);
+    beforeClick = underlay.presses;
+    click(pet.mapToGlobal(body));
+    check(underlay.presses == beforeClick, "normal pet body intercepts native clicks again");
+
+    {
+        pettime::PetWindow visitor(animation);
+        auto remote = pettime::PetRenderState::from(model);
+        remote.position += QPointF(220, 0);
+        visitor.presentRemote(remote, "X11 mode visitor", false);
+        visitor.show();
+        visitor.setBottomMode(true);
+        visitor.setBottomMode(false);
+        QTest::qWait(150);
+        check(above(visitor, underlay), "restored visitor remains above ordinary window");
+        check(inputTransparent(visitor), "restored visitor has an empty native input region");
+        check(visitor.mask().contains(visitor.rect().center()),
+              "visitor body belongs to painted region");
+        beforeClick = underlay.presses;
+        click(visitor.mapToGlobal(visitor.rect().center()));
+        check(underlay.presses == beforeClick + 1,
+              "restored visitor still passes native body clicks");
+        visitor.hidePet();
+        visitor.setBottomMode(true);
+        visitor.setBottomMode(false);
+        check(!visitor.isVisible(), "mode switches do not revive a hidden visitor");
+    }
+
     QTest::qWait(app.doubleClickInterval() + 80);
     const QPointF oldPosition = model.position;
     const QPoint start = pet.mapToGlobal(body), delta(90, 30);
@@ -132,6 +293,24 @@ int main(int argc, char **argv) {
     const int before = underlay.presses;
     click(crack.mapToGlobal(QPoint(80, 420)));
     check(underlay.presses == before + 1, "crack overlay passes native clicks");
+    focus(display, &beforeModeFocus, &revert);
+    const QRect crackGeometry = crack.geometry();
+    crack.setBottomMode(true);
+    QTest::qWait(100);
+    check(crack.isVisible() && crack.geometry() == crackGeometry && above(underlay, crack),
+          "native stack places visible crack below ordinary window");
+    check(inputTransparent(crack), "bottom crack has an empty native input region");
+    crack.trigger(underlay.mapToGlobal(underlay.rect().center()));
+    QTest::qWait(100);
+    check(above(underlay, crack), "retriggered crack stays below ordinary window");
+    focus(display, &afterFocus, &revert);
+    check(beforeModeFocus == afterFocus, "bottom crack switch and retrigger preserve focus");
+    crack.setBottomMode(false);
+    QTest::qWait(100);
+    check(above(crack, underlay), "native stack restores crack above ordinary window");
+    check(inputTransparent(crack), "restored crack has an empty native input region");
+    focus(display, &afterFocus, &revert);
+    check(beforeModeFocus == afterFocus, "normal crack restoration preserves focus");
     // Exercise the real controller's model/window ownership through mass splits
     // and shutdown, in addition to the simulation-only unit tests.
     auto applicationPets = [&] {

@@ -4,6 +4,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScreen>
+#include <QWindow>
 
 namespace pettime {
 PetWindow::PetWindow(PetModel &model, const AnimationLibrary &animation)
@@ -34,6 +35,55 @@ void PetWindow::presentRemote(const PetRenderState &state, const QString &name, 
     frozen_ = frozen;
     present();
 }
+void PetWindow::setBottomMode(bool enabled) {
+    if (enabled && model_)
+        model_->dragging = false;
+    if (bottomMode_ == enabled)
+        return;
+    bottomMode_ = enabled;
+    const bool visible = isVisible();
+    const QRect bounds = geometry();
+    const bool highlighted = highlight_ && highlight_->isVisible();
+    const QRect highlightBounds = highlight_ ? highlight_->geometry() : QRect{};
+    auto flags = windowFlags();
+    const bool x11Bottom = enabled && QGuiApplication::platformName() == "xcb";
+    // X11 tools are group transients and can remain above our management panel
+    // even with BELOW set. An independent utility window can join the bottom layer.
+    flags = (flags & ~Qt::WindowType_Mask) | (x11Bottom ? Qt::Window : Qt::Tool);
+    flags.setFlag(Qt::WindowStaysOnTopHint, !enabled);
+    flags.setFlag(Qt::WindowStaysOnBottomHint, enabled);
+    flags.setFlag(Qt::WindowTransparentForInput, enabled || !model_);
+    // Discard the platform object: Qt 6.4's xcb recreation otherwise retains its
+    // transparency cache and can leave the new native window accepting input.
+    if (windowHandle())
+        windowHandle()->destroy();
+    setAttribute(Qt::WA_X11NetWmWindowTypeUtility, x11Bottom);
+    setAttribute(Qt::WA_TransparentForMouseEvents, enabled || !model_);
+    setWindowFlags(flags);
+    setGeometry(bounds);
+    if (visible) {
+        show();
+        if (enabled)
+            lower();
+    }
+    if (highlight_) {
+        auto highlightFlags = highlight_->windowFlags();
+        highlightFlags = (highlightFlags & ~Qt::WindowType_Mask) |
+                         (x11Bottom ? Qt::Window : Qt::Tool);
+        highlightFlags.setFlag(Qt::WindowStaysOnTopHint, !enabled);
+        highlightFlags.setFlag(Qt::WindowStaysOnBottomHint, enabled);
+        if (highlight_->windowHandle())
+            highlight_->windowHandle()->destroy();
+        highlight_->setAttribute(Qt::WA_X11NetWmWindowTypeUtility, x11Bottom);
+        highlight_->setWindowFlags(highlightFlags);
+        highlight_->setGeometry(highlightBounds);
+        if (highlighted) {
+            highlight_->show();
+            if (enabled)
+                highlight_->lower();
+        }
+    }
+}
 QRegion PetWindow::inputRegion(const QImage &source, QSize logicalSize) {
     // A non-zero alpha mask passes only painted pixels to the pet. It also works on
     // Windows, unlike ignoring a mouse event (which does not forward it to other apps).
@@ -62,10 +112,13 @@ void PetWindow::highlight() {
     if (!isVisible() || frozen_ || (model_ && model_->dispatchPaused))
         return;
     if (!highlight_) {
+        const bool x11Bottom = bottomMode_ && QGuiApplication::platformName() == "xcb";
         highlight_ = std::make_unique<QLabel>(
-            nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+            nullptr, (x11Bottom ? Qt::Window : Qt::Tool) | Qt::FramelessWindowHint |
+                         (bottomMode_ ? Qt::WindowStaysOnBottomHint : Qt::WindowStaysOnTopHint) |
                          Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput);
         highlight_->setAttribute(Qt::WA_TranslucentBackground);
+        highlight_->setAttribute(Qt::WA_X11NetWmWindowTypeUtility, x11Bottom);
         highlight_->setAttribute(Qt::WA_ShowWithoutActivating);
         highlight_->setAttribute(Qt::WA_TransparentForMouseEvents);
         highlight_->setTextFormat(Qt::PlainText);
@@ -77,7 +130,8 @@ void PetWindow::highlight() {
     highlightElapsed_ = 0;
     highlightClock_.restart();
     present();
-    if (highlight_->isVisible()) highlight_->raise();
+    if (highlight_->isVisible() && !bottomMode_)
+        highlight_->raise();
 }
 void PetWindow::hidePet() {
     if (highlight_)
@@ -131,8 +185,10 @@ void PetWindow::paintEvent(QPaintEvent *) {
     ++painted_;
 }
 void PetWindow::mousePressEvent(QMouseEvent *e) {
-    if (!model_)
+    if (bottomMode_ || !model_) {
+        e->ignore();
         return;
+    }
     if (e->button() == Qt::RightButton) {
         emit contextRequested(e->globalPosition().toPoint());
         return;
@@ -144,8 +200,10 @@ void PetWindow::mousePressEvent(QMouseEvent *e) {
     }
 }
 void PetWindow::mouseMoveEvent(QMouseEvent *e) {
-    if (!model_)
+    if (bottomMode_ || !model_) {
+        e->ignore();
         return;
+    }
     if (!model_->dragging)
         return;
     QScreen *screen = QGuiApplication::screenAt(e->globalPosition().toPoint());
@@ -154,14 +212,18 @@ void PetWindow::mouseMoveEvent(QMouseEvent *e) {
     present();
 }
 void PetWindow::mouseReleaseEvent(QMouseEvent *e) {
-    if (!model_)
+    if (bottomMode_ || !model_) {
+        e->ignore();
         return;
+    }
     if (e->button() == Qt::LeftButton)
         model_->dragging = false;
 }
 void PetWindow::mouseDoubleClickEvent(QMouseEvent *e) {
-    if (!model_)
+    if (bottomMode_ || !model_) {
+        e->ignore();
         return;
+    }
     if (e->button() == Qt::LeftButton && model_->active() && !model_->transitioning() &&
         !model_->dispatchLocked) {
         model_->dragging = false;

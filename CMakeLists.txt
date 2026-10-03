@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Pettime VERSION 0.3.4 LANGUAGES CXX)
+project(Pettime VERSION 0.3.5 LANGUAGES CXX)
 
 include(cmake/SourceFingerprint.cmake)
 pettime_source_fingerprint("${CMAKE_CURRENT_SOURCE_DIR}" PETTIME_SOURCE_FINGERPRINT)
@@ -18,6 +18,7 @@ add_library(pettime_lib STATIC
     src/PetWindow.cpp src/CrackWindow.cpp src/SettingsStore.cpp
     src/SingleInstance.cpp src/ApplicationController.cpp
     src/NetworkService.cpp src/NetworkPanel.cpp src/DispatchController.cpp
+    src/FoodInventory.cpp
 )
 target_include_directories(pettime_lib PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(pettime_lib PUBLIC PETTIME_VERSION="${PROJECT_VERSION}")
@@ -64,4 +65,16 @@ if(BUILD_TESTING)
     set_tests_properties(network_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     add_test(NAME pettime_tests COMMAND pettime_tests)
     set_tests_properties(pettime_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(food_tests tests/TestFood.cpp)
+    target_link_libraries(food_tests PRIVATE pettime_lib Qt6::Test)
+    add_test(NAME food_tests COMMAND food_tests)
+    set_tests_properties(food_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(window_mode_tests tests/TestWindowMode.cpp resources.qrc)
+    target_link_libraries(window_mode_tests PRIVATE pettime_lib Qt6::Test)
+    add_test(NAME window_mode_tests COMMAND window_mode_tests)
+    set_tests_properties(window_mode_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(food_application_tests tests/TestFoodApplication.cpp resources.qrc)
+    target_link_libraries(food_application_tests PRIVATE pettime_lib Qt6::Test)
+    add_test(NAME food_application_tests COMMAND food_application_tests)
+    set_tests_properties(food_application_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

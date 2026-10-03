@@ -1,6 +1,8 @@
 #include "CrackWindow.h"
 #include "PetModel.h"
+#include <QGuiApplication>
 #include <QPainter>
+#include <QWindow>
 #include <algorithm>
 #include <cmath>
 
@@ -18,6 +20,28 @@ CrackWindow::CrackWindow(std::uint32_t seed)
 }
 double CrackWindow::random(double low, double high) {
     return low + (high - low) * (double(rng_()) / 4294967296.0);
+}
+void CrackWindow::setBottomMode(bool enabled) {
+    if (bottomMode_ == enabled)
+        return;
+    bottomMode_ = enabled;
+    const bool visible = isVisible();
+    const QRect bounds = geometry();
+    auto flags = windowFlags();
+    const bool x11Bottom = enabled && QGuiApplication::platformName() == "xcb";
+    flags = (flags & ~Qt::WindowType_Mask) | (x11Bottom ? Qt::Window : Qt::Tool);
+    flags.setFlag(Qt::WindowStaysOnTopHint, !enabled);
+    flags.setFlag(Qt::WindowStaysOnBottomHint, enabled);
+    if (windowHandle())
+        windowHandle()->destroy();
+    setAttribute(Qt::WA_X11NetWmWindowTypeUtility, x11Bottom);
+    setWindowFlags(flags);
+    setGeometry(bounds);
+    if (visible) {
+        show();
+        if (enabled)
+            lower();
+    }
 }
 void CrackWindow::trigger(QPointF center) {
     fractures_.clear();
@@ -67,7 +91,10 @@ void CrackWindow::trigger(QPointF center) {
     age_ = 0;
     move(qRound(center.x()) - 320, qRound(center.y()) - 320);
     show();
-    raise();
+    if (bottomMode_)
+        lower();
+    else
+        raise();
     update();
 }
 void CrackWindow::advance(double dt) {
