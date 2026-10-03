@@ -17,6 +17,9 @@ class SwarmController {
     PetModel *find(std::uint64_t id) const;
     bool removeLocalPet(std::uint64_t id);
     bool rename(std::uint64_t id, const QString &name);
+    bool canReproduce(quint64 id) const;
+    bool reproduce(quint64 id);
+    bool splitPrimary();
     void setLimit(int limit);
     int limit() const { return limit_; }
     std::function<void(std::uint64_t)> beforeRemove;

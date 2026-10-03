@@ -4,12 +4,19 @@
 #include "ApplicationController.h"
 #include "CrackWindow.h"
 #include "PetWindow.h"
+#include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QCursor>
+#include <QDialog>
 #include <QLabel>
 #include <QLibrary>
+#include <QMenu>
 #include <QMouseEvent>
+#include <QPixmap>
+#include <QPushButton>
 #include <QScreen>
+#include <QSysInfo>
 #include <QTemporaryDir>
 #include <QWindow>
 #include <QtTest>
@@ -311,8 +318,7 @@ int main(int argc, char **argv) {
     check(inputTransparent(crack), "restored crack has an empty native input region");
     focus(display, &afterFocus, &revert);
     check(beforeModeFocus == afterFocus, "normal crack restoration preserves focus");
-    // Exercise the real controller's model/window ownership through mass splits
-    // and shutdown, in addition to the simulation-only unit tests.
+    // Exercise adult-only division and window ownership through the real controller.
     auto applicationPets = [&] {
         std::vector<pettime::PetWindow *> result;
         for (auto *widget : QApplication::topLevelWidgets())
@@ -347,10 +353,10 @@ int main(int argc, char **argv) {
             check(crushed.count() == 1, "controller receives crush input");
             QElapsedTimer wait;
             wait.start();
-            while (applicationPets().size() != 10 && wait.elapsed() < 3000)
+            while (applicationPets().size() != 4 && wait.elapsed() < 3000)
                 QTest::qWait(20);
-            check(applicationPets().size() == 10,
-                  "controller creates exactly ten pets after adult crush");
+            check(applicationPets().size() == 4,
+                  "controller creates exactly four pets after adult crush");
             for (auto *window : applicationPets())
                 crushWindow(window);
             wait.restart();
@@ -359,11 +365,92 @@ int main(int argc, char **argv) {
                 QTest::qWait(20);
                 bounded = bounded && applicationPets().size() <= 72;
             }
-            check(bounded && applicationPets().size() > 10,
-                  "controller mass split respects total window limit");
+            check(bounded && applicationPets().size() == 4,
+                  "controller juvenile double clicks cannot split again");
         }
     }
     check(applicationPets().empty(), "controller destruction releases every pet window");
+    {
+        QTemporaryDir data;
+        check(data.isValid(), "interaction controller has a temporary save directory");
+        if (data.isValid()) {
+            pettime::RunOptions options;
+            options.seed = 42;
+            pettime::ApplicationController controller(
+                animation, pettime::SettingsStore(data.path()), options);
+            controller.start();
+            QAction *interactionAction = nullptr, *bottomAction = nullptr;
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *menu = qobject_cast<QMenu *>(widget))
+                    for (auto *action : menu->actions()) {
+                        if (action->text() == "互动面板…")
+                            interactionAction = action;
+                        if (action->text() == "隐藏蟑螂（置底）")
+                            bottomAction = action;
+                    }
+            check(interactionAction && bottomAction, "interaction and bottom menu actions found");
+            if (interactionAction)
+                interactionAction->trigger();
+            QDialog *dialog = nullptr;
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (widget->windowTitle() == "互动面板")
+                    dialog = qobject_cast<QDialog *>(widget);
+            check(dialog && dialog->isVisible(), "interaction panel opens from the menu");
+            if (dialog) {
+                check(QTest::qWaitForWindowExposed(dialog), "interaction panel exposed");
+                // Let the WM finish placing/activating the dialog before computing
+                // native click coordinates; exposure alone can precede placement.
+                dialog->activateWindow();
+                check(QTest::qWaitForWindowActive(dialog), "interaction panel active");
+                QTest::qWait(150);
+                auto *target = dialog->findChild<QComboBox *>("interactionTarget");
+                auto *action = dialog->findChild<QComboBox *>("interactionAction");
+                auto *perform = dialog->findChild<QPushButton *>("performInteraction");
+                auto *result = dialog->findChild<QLabel *>("interactionResult");
+                check(target && action && perform && result, "interaction panel controls found");
+                if (target && action && perform && result) {
+                    check(target->currentData().toULongLong() == 1 &&
+                              target->currentText().contains(QSysInfo::machineHostName()),
+                          "interaction panel initially selects the primary pet");
+                    check(action->currentIndex() == 0 && perform->isEnabled(),
+                          "petting is initially available in the ordinary panel");
+                    if (perform->isEnabled())
+                        click(perform->mapToGlobal(perform->rect().center()));
+                    QElapsedTimer wait;
+                    wait.start();
+                    while (!result->text().contains("摸摸完成") && wait.elapsed() < 3000)
+                        QTest::qWait(20);
+                    check(result->text().contains("摸摸完成"),
+                          "ordinary interaction panel accepts native petting clicks");
+                    if (bottomAction)
+                        bottomAction->trigger();
+                    action->setCurrentIndex(1);
+                    check(perform->isEnabled(), "reproduction is available after switching to bottom mode");
+                    if (perform->isEnabled())
+                        click(perform->mapToGlobal(perform->rect().center()));
+                    wait.restart();
+                    while (applicationPets().size() != 2 && wait.elapsed() < 3000)
+                        QTest::qWait(20);
+                    const auto windows = applicationPets();
+                    bool allBottom = true;
+                    for (auto *window : windows)
+                        allBottom = allBottom && window->bottomMode() &&
+                                    inputTransparent(*window) && above(*dialog, *window);
+                    check(windows.size() == 2 && allBottom,
+                          "reproduction keeps both pet windows below the panel with empty native input");
+                    check(dialog->isVisible() &&
+                              !dialog->windowFlags().testFlag(Qt::WindowTransparentForInput) &&
+                              target->isEnabled() && action->isEnabled() &&
+                              result->text().contains("生下了 1 只幼体"),
+                          "interaction panel remains operable while pet windows are at the bottom");
+                }
+                const QString screenshot = qEnvironmentVariable("PETTIME_INTERACTION_SCREENSHOT");
+                if (!screenshot.isEmpty())
+                    check(dialog->grab().save(screenshot), "interaction panel screenshot saved");
+            }
+        }
+    }
+    check(applicationPets().empty(), "interaction controller destruction releases every pet window");
     motion(display, -1, initialCursor.x(), initialCursor.y(), 0);
     flush(display);
     close(display);

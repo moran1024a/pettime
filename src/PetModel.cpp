@@ -58,10 +58,12 @@ QPointF exitTarget(QPointF position, QRectF area, int edge) {
 } // namespace
 
 PetModel::PetModel(std::uint32_t seed, QPointF center, QRectF bounds, bool young)
-    : position(center), area(bounds), juvenile(young), rng_(seed), growthRng_(seed ^ 0x9e3779b9U) {
+    : position(center), area(bounds), juvenile(young), rng_(seed), growthRng_(seed ^ 0x9e3779b9U),
+      affectionRng_(seed ^ 0x85ebca6bU) {
     growth_ = young ? 0 : 100;
     growthDuration_ = young ? nextGrowthDuration() : 0;
     scale = growthScale(growth_);
+    affectionDecayRemaining_ = nextAffectionDecay();
     nextSpecial_ = young ? random(1.8, 4.2) : random(20, 50);
     setArea(bounds);
     if (young)
@@ -169,11 +171,43 @@ QString PetModel::displayName() const {
 }
 bool PetModel::playFeeding() {
     if (!juvenile || !active() || expired || splitReady || dispatchPaused || dispatchLocked ||
-        transitioning() || cosmeticFeeding || frontal())
+        transitioning() || cosmeticFeeding || frontal() || petting)
         return false;
     cosmeticFeeding = true;
     cosmeticAge = 0;
     return true;
+}
+bool PetModel::startPetting() {
+    if (!active() || expired || splitReady || dispatchPaused || dispatchLocked || transitioning() ||
+        mealActive || eating || cosmeticFeeding || frontal() || dragging || petting)
+        return false;
+    petting = true;
+    pettingAge = 0;
+    return true;
+}
+void PetModel::cancelPetting() {
+    petting = false;
+    pettingAge = 0;
+}
+double PetModel::nextAffectionDecay() {
+    return std::uniform_int_distribution<int>(30, 60)(affectionRng_);
+}
+void PetModel::updateAffection(double dt) {
+    // These clocks use running time only, so suspension and offline time are never replayed.
+    if (dt > 1 || !active() || exiting())
+        return;
+    reproductionRemaining_ = std::max(0.0, reproductionRemaining_ - dt);
+    affectionDecayRemaining_ -= dt;
+    if (affectionDecayRemaining_ <= 1e-9) {
+        affection = std::max(0, affection - std::uniform_int_distribution<int>(1, 2)(affectionRng_));
+        affectionDecayRemaining_ = std::min(0.0, affectionDecayRemaining_) + nextAffectionDecay();
+    }
+}
+bool PetModel::canReproduce() const {
+    return !juvenile && active() && !expired && !splitReady && !dispatchPaused &&
+           !dispatchLocked && !transitioning() && motionGroup.isEmpty() && !mealActive &&
+           !eating && !cosmeticFeeding && !frontal() && !dragging && !petting &&
+           reproductionRemaining_ <= 0;
 }
 void PetModel::startFlight(bool front, bool manual) {
     crashQueued = front;
@@ -189,7 +223,7 @@ void PetModel::startFlight(bool front, bool manual) {
     cooldown_ = 3;
 }
 void PetModel::demoPounce() {
-    if (juvenile || cosmeticFeeding || dispatchLocked || transitioning() || !active())
+    if (juvenile || cosmeticFeeding || petting || dispatchLocked || transitioning() || !active())
         return;
     paused = mealActive = eating = false;
     revealLeft_ = 0;
@@ -197,7 +231,9 @@ void PetModel::demoPounce() {
     speed = std::max(speed, 40.0);
 }
 void PetModel::crush() {
-    if (!active() || dispatchLocked || transitioning())
+    if (juvenile || !motionGroup.isEmpty() || petting || cosmeticFeeding || mealActive || eating ||
+        frontal() || !active() || dispatchPaused || dispatchLocked || expired || splitReady ||
+        transitioning())
         return;
     cosmeticFeeding = false;
     paused = dragging = mealActive = eating = crashQueued = manualPounce = false;
@@ -207,6 +243,7 @@ void PetModel::crush() {
     speed = targetSpeed_ = 0;
 }
 void PetModel::becomeNymph() {
+    cancelPetting();
     juvenile = true;
     ++generation;
     scale = MinimumScale;
@@ -221,6 +258,7 @@ void PetModel::becomeNymph() {
     nextSpecial_ = random(2.5, 5.5);
 }
 void PetModel::retire() {
+    cancelPetting();
     cancelTransition();
     setManualControl(false);
     cosmeticFeeding = false;
@@ -260,6 +298,7 @@ bool PetModel::beginExit() {
     return true;
 }
 void PetModel::startTransition(Transition next, QPointF target, double duration) {
+    cancelPetting();
     transition_ = next;
     transitionStart_ = position;
     transitionEnd_ = target;
@@ -350,8 +389,11 @@ void PetModel::updateManual(double dt) {
 
 void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &neighbors) {
     impact = false;
+    if (petting && (!active() || expired || splitReady || transitioning()))
+        cancelPetting();
     if (!std::isfinite(dt) || dt <= 0 || dispatchPaused || expired || splitReady)
         return;
+    updateAffection(dt);
     // Lifetime and growth are independent; frozen dispatch simulation does not advance.
     age += dt;
     sinceEvade_ += dt;
@@ -359,6 +401,20 @@ void PetModel::advance(double dt, QPointF cursor, const std::vector<QPointF> &ne
         evadeCount = 0;
     if (active() && juvenile)
         addGrowth(dt * (100.0 / growthDuration_));
+    if (petting) {
+        pettingAge += dt;
+        if (pettingAge >= 2) {
+            petting = false;
+            const int before = affection;
+            affection = std::clamp(affection +
+                std::uniform_int_distribution<int>(2, 4)(affectionRng_), 0, 100);
+            lastPettingGain_ = affection - before;
+            ++pettingCompletions_;
+        }
+        previousCursor_ = cursor;
+        haveCursor_ = true;
+        return;
+    }
     if (cosmeticFeeding) {
         cosmeticAge += dt;
         if (cosmeticAge >= 2.65) {

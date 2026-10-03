@@ -128,6 +128,7 @@ class DispatchTest : public QObject {
     void clearLocalPetNeverSplitsOrReusesId() {
         Fixture f;
         auto *p = f.swarm.find(2);
+        p->advance(p->growthDuration(), {});
         p->crush();
         p->advance(1.1, {});
         QVERIFY(p->splitReady);
@@ -297,7 +298,7 @@ class DispatchTest : public QObject {
         app.primary_.advance(2.65, {});
         QVERIFY(app.primary_.growth() >= .5);
         QCOMPARE(child->growth(), childGrowth);
-        QCOMPARE(app.primary_.affection, 0);
+        QCOMPARE(app.primary_.affection, 40);
         app.primary_.advance(app.primary_.growthDuration(), {});
         app.refreshMenu();
         QVERIFY(app.demo_->isEnabled());
@@ -721,7 +722,7 @@ class DispatchTest : public QObject {
         QCOMPARE(p.position, stopped);
         p.advance(.1, {});
         QVERIFY(p.position.x() > stopped.x());
-        QCOMPARE(p.affection, 0);
+        QCOMPARE(p.affection, 40);
         p.setManualDirection({-1, -1});
         for (int i = 0; i < 100; ++i)
             p.advance(.1, {});
@@ -874,6 +875,22 @@ class DispatchTest : public QObject {
         bad = snap.encode();
         bad.removeLast();
         QVERIFY(!PetRenderState::decode(bad, decoded));
+        model.cosmeticFeeding = false;
+        model.affection = 83;
+        QVERIFY(model.startPetting());
+        const auto petting = PetRenderState::from(model);
+        QCOMPARE(petting.state, State::Happy);
+        QCOMPARE(petting.affection, 83);
+        QCOMPARE(petting.encode().size(), 18);
+        QVERIFY(PetRenderState::decode(petting.encode(), decoded));
+        QCOMPARE(decoded.affection, 83);
+        QCOMPARE(animation.render(petting), animation.render(decoded));
+        for (const QJsonValue invalid : {QJsonValue(-1), QJsonValue(101),
+                                         QJsonValue(2.5), QJsonValue("40"), QJsonValue(true)}) {
+            bad = petting.encode();
+            bad[17] = invalid;
+            QVERIFY(!PetRenderState::decode(bad, decoded));
+        }
     }
     void visitorWindowIsReadOnly() {
         AnimationLibrary animation;
@@ -1363,6 +1380,26 @@ class DispatchTest : public QObject {
         QCOMPARE(app.food_.count(), 2);
         QCOMPARE(app.dispatch_->visitors_[v.id].current.growth, v.current.growth);
         QVERIFY(!app.windows_.count(2));
+        app.showInteractions(2);
+        QVERIFY(app.interactionUse_->isEnabled());
+        app.interactionUse_->click();
+        auto *petting = app.swarm_.find(2);
+        QVERIFY(petting->petting);
+        QCOMPARE(app.dispatch_->visitors_[v.id].current.affection, v.current.affection);
+        app.dispatch_->freeze(app.dispatch_->outgoing_[2]);
+        petting->advance(2, {});
+        QCOMPARE(petting->pettingAge, 0.0);
+        app.persist();
+        QCOMPARE(petting->affection, 40);
+        QCOMPARE(app.food_.count(), 2);
+        app.dispatch_->outgoing_[2].frozenAt = -1;
+        petting->dispatchPaused = petting->dispatchLocked = false;
+        petting->advance(2, {});
+        app.persist();
+        QVERIFY(petting->affection >= 42 && petting->affection <= 44);
+        QVERIFY(app.pettingSerials_.isEmpty());
+        QVERIFY(!app.windows_.count(2));
+        QVERIFY(!app.interact(2, ApplicationController::Interaction::Reproduce));
         app.dispatch_->outgoing_[2].frozenAt = 1;
         QVERIFY(!app.canFeedPet(2));
         app.dispatch_->outgoing_[2].frozenAt = -1;
@@ -1410,6 +1447,9 @@ class DispatchTest : public QObject {
         QVERIFY(!app.controlPet_->isEnabled());
         QVERIFY(!app.renamePet_->isEnabled());
         QVERIFY(!app.foodPet_->isEnabled());
+        QVERIFY(!app.interactionPet_->isEnabled());
+        QVERIFY(!app.interact(app.selectedPet(), ApplicationController::Interaction::Petting));
+        QVERIFY(!app.interact(app.selectedPet(), ApplicationController::Interaction::Reproduce));
         QVERIFY(!app.canFeedPet(app.selectedPet()));
         QVERIFY(!app.highlightPet_->isEnabled());
         QVERIFY(!app.dispatchPet_->isEnabled());

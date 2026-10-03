@@ -20,6 +20,8 @@ QJsonObject SwarmController::saveProgress() const {
         pets.append(QJsonObject{{"id", QString::number(p->id)}, {"name", p->customName},
             {"growth", p->growth()}, {"growthState", PetModel::growthState(p->growth())},
             {"growthDuration", p->growthDuration()},
+            {"affectionDecayRemaining", p->affectionDecayRemaining()},
+            {"reproductionRemaining", p->reproductionRemaining()},
             {"affection", p->affection}, {"generation", p->generation}, {"age", p->age},
             {"scale", p->scale}, {"x", p->position.x()}, {"y", p->position.y()},
             {"heading", p->heading}});
@@ -67,7 +69,13 @@ void SwarmController::restoreProgress(const QJsonObject &object) {
             ? duration : restored->juvenile ? restored->nextGrowthDuration() : 0;
         restored->scale = restored->juvenile ? PetModel::growthScale(restored->growth_)
             : number(data, "scale", AdultScale, MinimumScale, 1);
-        restored->affection = int(number(data, "affection", 0, 0, 100));
+        restored->affection = int(number(data, "affection", 40, 0, 100));
+        const double decay = data.value("affectionDecayRemaining").toDouble(-1);
+        if (std::isfinite(decay) && decay >= 0 && decay <= 60)
+            restored->affectionDecayRemaining_ = decay;
+        const double reproduction = data.value("reproductionRemaining").toDouble(0);
+        if (std::isfinite(reproduction) && reproduction >= 0 && reproduction <= 1200)
+            restored->reproductionRemaining_ = reproduction;
         restored->generation = int(number(data, "generation", 0, 0, 1000000));
         restored->age = number(data, "age", 0, 0, 1e12);
         restored->heading = number(data, "heading", -Pi / 2, -2 * Pi, 2 * Pi);
@@ -108,6 +116,33 @@ bool SwarmController::rename(std::uint64_t id, const QString &name) {
     p->customName = name.trimmed().left(64);
     return true;
 }
+bool SwarmController::canReproduce(quint64 id) const {
+    const auto *p = find(id);
+    return p && p->motionGroup.isEmpty() && p->canReproduce() && pending_.empty() &&
+           totalCount() < limit_;
+}
+bool SwarmController::reproduce(quint64 id) {
+    if (!canReproduce(id))
+        return false;
+    auto *parent = find(id);
+    auto child = std::make_unique<PetModel>(
+        rng_(), parent->position + QPointF(45, 0), parent->area, true);
+    child->primary = false;
+    child->id = nextId_++;
+    child->generation = parent->generation + 1;
+    pets_.push_back(std::move(child));
+    parent->reproductionRemaining_ =
+        std::uniform_int_distribution<int>(600, 1200)(parent->affectionRng_);
+    return true;
+}
+bool SwarmController::splitPrimary() {
+    auto &p = primary();
+    if (!p.splitReady)
+        return false;
+    p.becomeNymph();
+    spawn(p.position, p.area, p.generation, 3);
+    return true;
+}
 void SwarmController::eraseExpired() {
     for (auto it = pets_.begin() + 1; it != pets_.end();) {
         if ((*it)->expired) {
@@ -144,7 +179,7 @@ void SwarmController::advance(double dt) {
     for (auto &p : pets_)
         if (!p->primary && p->splitReady) {
             pending_.push_back({p->position, p->area, p->generation + 1,
-                                std::min(limit_ - 1, 8 + static_cast<int>(rng_() % 5))});
+                                std::min(limit_ - 1, 4)});
             p->expired = true;
         }
     eraseExpired();

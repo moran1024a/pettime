@@ -159,7 +159,7 @@ QString DispatchController::dispatchPets(const QList<quint64> &ids, const QStrin
     QSet<quint64> unique(ids.begin(), ids.end());
     for (auto id : unique) {
         auto *p = swarm_.find(id);
-        if (!p || p->primary || !p->active() || p->expired || p->splitReady || p->transitioning() ||
+        if (!p || p->primary || p->petting || !p->active() || p->expired || p->splitReady || p->transitioning() ||
             outgoing_.contains(id)) {
             ++skipped;
             continue;

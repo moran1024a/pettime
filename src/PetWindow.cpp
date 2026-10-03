@@ -193,7 +193,7 @@ void PetWindow::mousePressEvent(QMouseEvent *e) {
         emit contextRequested(e->globalPosition().toPoint());
         return;
     }
-    if (e->button() == Qt::LeftButton && model_->primary && model_->active()) {
+    if (e->button() == Qt::LeftButton && model_->primary && model_->active() && !model_->petting) {
         model_->dragging = true;
         model_->speed = 0;
         dragOffset_ = e->globalPosition() - model_->position;
@@ -228,7 +228,8 @@ void PetWindow::mouseDoubleClickEvent(QMouseEvent *e) {
         !model_->dispatchLocked) {
         model_->dragging = false;
         model_->crush();
-        emit crushed();
+        if (model_->state == State::Crush)
+            emit crushed();
         present();
     }
 }

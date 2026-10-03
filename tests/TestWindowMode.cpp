@@ -98,6 +98,33 @@ class WindowModeTest : public QObject {
         QCOMPARE(model.state, State::Crush);
         QCOMPARE(crushed.count(), 1);
     }
+    void juvenilesAndPettingNeverEmitCrushed() {
+        PetModel model(2, {400, 300}, {0, 0, 800, 600}, true);
+        PetWindow window(model, *animation_);
+        window.present();
+        QSignalSpy crushed(&window, &PetWindow::crushed);
+        sendMouse(window, QEvent::MouseButtonDblClick, Qt::LeftButton);
+        QCOMPARE(crushed.count(), 0);
+        QVERIFY(model.state != State::Crush);
+        model.advance(model.growthDuration(), {});
+        QVERIFY(!model.juvenile);
+        QVERIFY(model.startPetting());
+        sendMouse(window, QEvent::MouseButtonPress, Qt::LeftButton);
+        QVERIFY(!model.dragging);
+        sendMouse(window, QEvent::MouseButtonDblClick, Qt::LeftButton);
+        QCOMPARE(crushed.count(), 0);
+        QVERIFY(model.petting);
+        window.setBottomMode(true);
+        model.advance(2, {});
+        window.present();
+        QVERIFY(!model.petting);
+        checkMode(window, true, true);
+        sendMouse(window, QEvent::MouseButtonDblClick, Qt::LeftButton);
+        QCOMPARE(crushed.count(), 0);
+        window.setBottomMode(false);
+        sendMouse(window, QEvent::MouseButtonDblClick, Qt::LeftButton);
+        QCOMPARE(crushed.count(), 1);
+    }
     void visitorRoundTripStaysReadOnly() {
         PetWindow visitor(*animation_);
         PetRenderState state;

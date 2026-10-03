@@ -39,6 +39,13 @@ class ApplicationController : public QObject {
   private:
     friend class DispatchTest;
     friend class FoodApplicationTest;
+    friend class InteractionApplicationTest;
+    enum class Interaction { Petting, Reproduce };
+    QString interactionBlockReason(quint64 id, Interaction action) const;
+    bool interact(quint64 id, Interaction action);
+    bool settleInteractions(quint64 removing = 0);
+    void showInteractions(quint64 id = 0);
+    void refreshInteractions();
     bool eventFilter(QObject *object, QEvent *event) override;
     void stopControl();
     void clearControlKeys();
@@ -76,6 +83,10 @@ class ApplicationController : public QObject {
     SwarmController swarm_;
     FoodInventory food_;
     QHash<quint64, quint64> feedingSerials_;
+    QHash<quint64, quint64> pettingSerials_;
+    std::mt19937 rewardRng_;
+    double interactionCooldown_ = 0;
+    bool progressChanged_ = false;
     PetModel &primary_;
     PetWindow mainWindow_;
     CrackWindow crack_;
@@ -86,6 +97,12 @@ class ApplicationController : public QObject {
     std::unique_ptr<NetworkPanel> networkPanel_;
     std::unique_ptr<QDialog> petDialog_;
     std::unique_ptr<QDialog> foodDialog_;
+    std::unique_ptr<QDialog> interactionDialog_;
+    QComboBox *interactionTarget_ = nullptr, *interactionAction_ = nullptr;
+    QLabel *interactionDetails_ = nullptr, *interactionReason_ = nullptr,
+           *interactionResult_ = nullptr;
+    QPushButton *interactionUse_ = nullptr, *interactionPet_ = nullptr;
+    QString lastInteractionResult_;
     QComboBox *foodTarget_ = nullptr;
     QLabel *foodStock_ = nullptr, *foodReason_ = nullptr;
     QPushButton *foodUse_ = nullptr;

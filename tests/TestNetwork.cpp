@@ -155,7 +155,15 @@ class NetworkTest : public QObject {
         QTRY_VERIFY(!p->cosmeticFeeding);
         const double bonus = p->growth() - growthBefore - (p->age - ageBefore) * 100 / p->growthDuration();
         QVERIFY(bonus >= .5 - 1e-8 && bonus <= 1.5 + 1e-8);
-        QCOMPARE(p->affection, 0);
+        QCOMPARE(p->affection, 40);
+        QVERIFY(p->startPetting());
+        QTRY_COMPARE(guest.visitors()[id].current.state, State::Happy);
+        QTRY_COMPARE(guest.visitors()[id].current.affection, p->affection);
+        QTRY_VERIFY(!p->petting);
+        QVERIFY(p->affection >= 42 && p->affection <= 44);
+        QCOMPARE(p->pettingCompletions(), quint64(1));
+        QTRY_COMPARE(guest.visitors()[id].current.affection, p->affection);
+        QCOMPARE(target.primary().affection, 40);
         QCOMPARE(source.primary().growth(), 100.0);
         QTRY_VERIFY(std::abs(guest.visitors()[id].current.growth - p->growth()) < .1);
         p->advance(p->growthDuration(), {});

@@ -69,10 +69,10 @@ int SettingsStore::loadAffinity(QString *warning) const {
         const auto pets = loadJson("progress.json", warning).value("pets").toArray();
         for (const auto &value : pets) {
             const auto p = value.toObject();
-            if (p.value("id").toString() == "1")
-                return std::clamp(p.value("affection").toInt(), 0, 100);
+            if (p.value("id").toString() == "1" || p.value("id").toDouble() == 1)
+                return std::clamp(p.value("affection").toInt(40), 0, 100);
         }
-        return 0;
+        return 40;
     }
     QString path = QDir(directory_).filePath("affinity.dat");
 #ifdef Q_OS_WIN
@@ -86,18 +86,18 @@ int SettingsStore::loadAffinity(QString *warning) const {
 #endif
     QFile file(path);
     if (!file.exists())
-        return 0;
+        return 40;
     if (!file.open(QIODevice::ReadOnly)) {
         if (warning)
             *warning = file.errorString();
-        return 0;
+        return 40;
     }
     bool ok = false;
     const int value = file.read(128).trimmed().toInt(&ok);
     if (!ok) {
         if (warning)
             *warning = "好感度存档损坏，已使用初始值。";
-        return 0;
+        return 40;
     }
     const int bounded = std::clamp(value, 0, 100);
     return bounded;

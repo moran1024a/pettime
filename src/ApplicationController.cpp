@@ -45,6 +45,7 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
       options_(std::move(options)),
       swarm_(options_.seed, areaAt(QCursor::pos()).center(), areaAt(QCursor::pos())),
       food_(options_.seed + 3),
+      rewardRng_(options_.seed ^ 0xc2b2ae35U),
       primary_(swarm_.primary()), mainWindow_(primary_, animation_), crack_(options_.seed + 2) {
     QString warning;
     const bool hasConfig = store_.hasFile("config.json");
@@ -65,6 +66,9 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
             const auto progress = store_.loadJson("progress.json", &warning);
             swarm_.restoreProgress(progress);
             food_.restore(progress.value("food").toObject());
+            const double cooldown = progress.value("interaction").toObject()
+                .value("cooldownRemaining").toDouble(0);
+            interactionCooldown_ = std::isfinite(cooldown) ? std::clamp(cooldown, 0.0, 10.0) : 0;
         } else
             primary_.affection = legacy.loadAffinity(&warning);
     }
@@ -78,6 +82,8 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
     crack_.setBottomMode(bottomMode_);
     swarm_.beforeRemove = [this](std::uint64_t id) {
         settleFood(id);
+        settleInteractions(id);
+        progressChanged_ = true;
         if (controlledPet_ == id)
             stopControl();
         if (dispatch_)
@@ -115,6 +121,7 @@ ApplicationController::ApplicationController(const AnimationLibrary &animation, 
             if (petDialog_ && petDialog_->isVisible())
                 refreshPets();
             refreshFood();
+            refreshInteractions();
         });
     });
     connect(dispatch_.get(), &DispatchController::notice, this, [this](const QString &text) {
@@ -184,6 +191,7 @@ void ApplicationController::makeMenu() {
     });
     affection_ = menu_.addAction("");
     affection_->setEnabled(false);
+    menu_.addAction("互动面板…", this, [this] { showInteractions(contextPet_); });
     menu_.addAction("食物面板…", this, [this] { showFood(contextPet_); });
     demo_ = menu_.addAction("立即演示飞扑");
     connect(demo_, &QAction::triggered, this, [this] { primary_.demoPounce(); });
@@ -258,7 +266,7 @@ void ApplicationController::refreshMenu() {
                                   : "很亲近";
     affection_->setText(QString("好感度 %1 / 100 · %2").arg(a).arg(mood));
     bottomAction_->setChecked(bottomMode_);
-    demo_->setEnabled(!primary_.juvenile && !primary_.cosmeticFeeding && primary_.active());
+    demo_->setEnabled(!primary_.juvenile && !primary_.cosmeticFeeding && !primary_.petting && primary_.active());
     if (auto *sizes = menu_.findChild<QMenu *>("sizes")) {
         sizes->setEnabled(!primary_.juvenile);
         for (auto *action : sizes->actions())
@@ -299,7 +307,7 @@ QString ApplicationController::selectedVisitor() const {
 }
 bool ApplicationController::canStartControl(quint64 id) const {
     const auto *p = swarm_.find(id);
-    return p && !p->primary && !p->transitioning() && !p->dispatchLocked && p->active() &&
+    return p && !p->primary && !p->petting && !p->transitioning() && !p->dispatchLocked && p->active() &&
            !p->expired && !p->splitReady && !p->dispatchPaused && dispatch_->canControl(id);
 }
 bool ApplicationController::canFeedPet(quint64 id) const {
@@ -307,7 +315,7 @@ bool ApplicationController::canFeedPet(quint64 id) const {
     return p && p->growth() < 100 && food_.count() > 0 && !food_.pending().contains(id) &&
            dispatch_->canControl(id) && p->active() && !p->transitioning() &&
            !p->dispatchLocked && !p->dispatchPaused && !p->expired && !p->splitReady &&
-           !p->mealActive && !p->cosmeticFeeding && !p->frontal();
+           !p->mealActive && !p->cosmeticFeeding && !p->petting && !p->frontal();
 }
 bool ApplicationController::useFood(quint64 id) {
     if (!canFeedPet(id) || !food_.reserve(id))
@@ -342,6 +350,175 @@ bool ApplicationController::settleFood(quint64 removing) {
         changed = true;
     }
     return changed;
+}
+QString ApplicationController::interactionBlockReason(quint64 id, Interaction action) const {
+    const auto *p = swarm_.find(id);
+    if (!p)
+        return "请选择自己的蟑螂，访客不可互动。";
+    if (!p->active() || p->expired || p->splitReady)
+        return "该蟑螂正在分裂或退场。";
+    if (p->dispatchPaused)
+        return "等待重连，互动暂时冻结。";
+    if (!dispatch_->canControl(id) || p->dispatchLocked || p->transitioning())
+        return "正在派遣交接或入离场，请稍后再试。";
+    if (p->petting)
+        return "正在摸摸，完成后结算好感度和食物奖励。";
+    if (p->cosmeticFeeding || p->mealActive || p->eating || p->frontal() || p->dragging)
+        return "正在进食、飞扑或拖动，请稍后再试。";
+    if (action == Interaction::Petting) {
+        if (interactionCooldown_ > 1e-9)
+            return QString("摸摸冷却：还需 %1 秒（所有蟑螂共用）。")
+                .arg(int(std::ceil(interactionCooldown_)));
+        return {};
+    }
+    if (dispatch_->outgoing().contains(id) || !p->motionGroup.isEmpty())
+        return "生殖仅限本机自有蟑螂，请先召回。";
+    if (p->growth() < 100)
+        return "成年后才能生殖；幼体双击也不会分裂。";
+    if (p->reproductionRemaining() > 1e-9) {
+        const int seconds = int(std::ceil(p->reproductionRemaining()));
+        return QString("生殖冷却：还需 %1 分 %2 秒。").arg(seconds / 60).arg(seconds % 60);
+    }
+    if (swarm_.pendingCount() || swarm_.totalCount() >= swarm_.limit())
+        return "数量已满或有幼体等待出生，暂不能生殖。";
+    return swarm_.canReproduce(id) ? QString{} : QStringLiteral("当前状态暂不可生殖。");
+}
+bool ApplicationController::interact(quint64 id, Interaction action) {
+    if (!interactionBlockReason(id, action).isEmpty()) {
+        refreshInteractions();
+        return false;
+    }
+    auto *p = swarm_.find(id);
+    clearControlKeys();
+    if (action == Interaction::Petting) {
+        if (!p->startPetting())
+            return false;
+        pettingSerials_.insert(id, p->pettingCompletions());
+        interactionCooldown_ = 10;
+        lastInteractionResult_ = QString("正在摸摸 %1…").arg(p->displayName());
+    } else {
+        if (!swarm_.reproduce(id))
+            return false;
+        lastInteractionResult_ = QString("%1 生下了 1 只幼体，亲体保留，生殖冷却已开始。")
+            .arg(p->displayName());
+        reconcileWindows();
+    }
+    persist();
+    refreshPets();
+    refreshFood();
+    refreshInteractions();
+    return true;
+}
+bool ApplicationController::settleInteractions(quint64 removing) {
+    bool changed = false;
+    const auto pending = pettingSerials_;
+    for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        const auto *p = swarm_.find(it.key());
+        if (p && p->pettingCompletions() > it.value()) {
+            const bool won = std::uniform_int_distribution<int>(1, 10)(rewardRng_) == 1;
+            const int added = won ? food_.grantInteractionReward() : 0;
+            lastInteractionResult_ = QString("%1：摸摸完成，好感度 +%2。%3")
+                .arg(p->displayName()).arg(p->lastPettingGain())
+                .arg(added ? "获得 1 粒面包屑！" : won ? "抽中了面包屑，但库存已满。" : "本次没有掉落食物。");
+        } else if (!p || it.key() == removing || !p->petting || p->expired) {
+            lastInteractionResult_ = "摸摸已中断，没有增加好感度或发放食物。";
+        } else {
+            continue;
+        }
+        pettingSerials_.remove(it.key());
+        changed = true;
+    }
+    progressChanged_ = progressChanged_ || changed;
+    return changed;
+}
+void ApplicationController::showInteractions(quint64 id) {
+    clearControlKeys();
+    if (!interactionDialog_) {
+        interactionDialog_ = std::make_unique<QDialog>();
+        interactionDialog_->setWindowTitle("互动面板");
+        interactionDialog_->resize(480, 440);
+        auto *layout = new QVBoxLayout(interactionDialog_.get());
+        layout->addWidget(new QLabel("选择蟑螂："));
+        interactionTarget_ = new QComboBox;
+        interactionTarget_->setObjectName("interactionTarget");
+        layout->addWidget(interactionTarget_);
+        interactionDetails_ = new QLabel;
+        interactionDetails_->setTextFormat(Qt::PlainText);
+        interactionDetails_->setWordWrap(true);
+        layout->addWidget(interactionDetails_);
+        interactionAction_ = new QComboBox;
+        interactionAction_->setObjectName("interactionAction");
+        interactionAction_->addItem("摸摸", int(Interaction::Petting));
+        interactionAction_->addItem("生殖", int(Interaction::Reproduce));
+        layout->addWidget(interactionAction_);
+        interactionReason_ = new QLabel;
+        interactionReason_->setWordWrap(true);
+        layout->addWidget(interactionReason_);
+        interactionUse_ = new QPushButton;
+        interactionUse_->setObjectName("performInteraction");
+        layout->addWidget(interactionUse_);
+        interactionResult_ = new QLabel;
+        interactionResult_->setObjectName("interactionResult");
+        interactionResult_->setTextFormat(Qt::PlainText);
+        interactionResult_->setWordWrap(true);
+        layout->addWidget(interactionResult_);
+        auto *restore = new QPushButton("恢复蟑螂显示");
+        layout->addWidget(restore);
+        connect(restore, &QPushButton::clicked, this, [this] { setBottomMode(false); });
+        connect(interactionTarget_, &QComboBox::currentIndexChanged, this,
+                [this] { refreshInteractions(); });
+        connect(interactionAction_, &QComboBox::currentIndexChanged, this,
+                [this] { refreshInteractions(); });
+        connect(interactionUse_, &QPushButton::clicked, this, [this] {
+            interact(interactionTarget_->currentData().toULongLong(),
+                     Interaction(interactionAction_->currentData().toInt()));
+        });
+    }
+    refreshInteractions();
+    const int index = interactionTarget_->findData(QVariant::fromValue<qulonglong>(id));
+    if (index >= 0)
+        interactionTarget_->setCurrentIndex(index);
+    refreshInteractions();
+    interactionDialog_->show();
+    interactionDialog_->raise();
+    interactionDialog_->activateWindow();
+}
+void ApplicationController::refreshInteractions() {
+    if (!interactionDialog_)
+        return;
+    const QSignalBlocker blocker(interactionTarget_);
+    const auto selected = interactionTarget_->currentData().toULongLong();
+    int row = 0;
+    for (const auto &p : swarm_.pets()) {
+        if (p->expired || !p->active())
+            continue;
+        const auto text = QString("%1 · %2").arg(p->displayName(), dispatch_->location(p->id));
+        if (row == interactionTarget_->count())
+            interactionTarget_->addItem(text);
+        else if (interactionTarget_->itemText(row) != text)
+            interactionTarget_->setItemText(row, text);
+        interactionTarget_->setItemData(row++, QVariant::fromValue<qulonglong>(p->id));
+    }
+    while (interactionTarget_->count() > row)
+        interactionTarget_->removeItem(row);
+    const int index = interactionTarget_->findData(QVariant::fromValue<qulonglong>(selected));
+    interactionTarget_->setCurrentIndex(index >= 0 ? index : (row ? 0 : -1));
+    const auto id = interactionTarget_->currentData().toULongLong();
+    const auto *p = swarm_.find(id);
+    interactionDetails_->setText(p ? QString("好感度 %1 / 100 · %2 · 成长 %3%\n"
+        "好感度每隔随机 30～60 秒下降 1～2 点。面包屑 %4 / %5（含使用中）。")
+        .arg(p->affection).arg(PetModel::growthState(p->growth()))
+        .arg(std::floor(p->growth() * 10) / 10, 0, 'f', 1)
+        .arg(food_.count() + food_.reservedCount()).arg(FoodInventory::Capacity) : "暂无可选择的蟑螂。");
+    const auto action = Interaction(interactionAction_->currentData().toInt());
+    const auto reason = interactionBlockReason(id, action);
+    const QString description = action == Interaction::Petting
+        ? "摸摸约 2 秒，完成后好感度 +2～4（最高 100），10% 概率获得 1 粒面包屑。所有蟑螂共用 10 秒冷却。"
+        : "仅本机成体可生殖：保留亲体，新增 1 只幼体，随后独立冷却 10～20 分钟。满员不生殖。";
+    interactionReason_->setText(description + "\n" + (reason.isEmpty() ? "可以开始。" : reason));
+    interactionUse_->setText(action == Interaction::Petting ? "摸摸" : "生殖 · 新增 1 只幼体");
+    interactionUse_->setEnabled(reason.isEmpty());
+    interactionResult_->setText(lastInteractionResult_);
 }
 void ApplicationController::showFood(quint64 id) {
     clearControlKeys();
@@ -431,7 +608,7 @@ void ApplicationController::setBottomMode(bool enabled) {
 }
 bool ApplicationController::canDispatchPet(quint64 id) const {
     const auto *p = swarm_.find(id);
-    return p && !p->primary && p->active() && !p->transitioning() && !p->dispatchLocked &&
+    return p && !p->primary && !p->petting && p->active() && !p->transitioning() && !p->dispatchLocked &&
            !p->dispatchPaused && !p->expired && !p->splitReady && p->motionGroup.isEmpty() &&
            !dispatch_->outgoing().contains(id) && !dispatch_->stoppingService();
 }
@@ -588,12 +765,14 @@ void ApplicationController::showPets() {
         renamePet_ = new QPushButton("重命名");
         highlightPet_ = new QPushButton("高亮定位");
         foodPet_ = new QPushButton("食物…");
+        interactionPet_ = new QPushButton("互动…");
+        interactionPet_->setObjectName("openInteractions");
         clearPet_ = new QPushButton("清除");
         clearPet_->setToolTip("立即清除仍在本机的自有非主实体，不触发分裂。");
         connect(clearPet_, &QPushButton::clicked, this, [this] {
             clearPet(selectedPet());
         });
-        for (auto *button : {renamePet_, highlightPet_, foodPet_, clearPet_})
+        for (auto *button : {renamePet_, highlightPet_, foodPet_, interactionPet_, clearPet_})
             buttons->addWidget(button);
         layout->addLayout(buttons);
         auto *dispatchButtons = new QHBoxLayout;
@@ -652,6 +831,11 @@ void ApplicationController::showPets() {
             const auto id = selectedPet();
             if (swarm_.find(id))
                 showFood(id);
+        });
+        connect(interactionPet_, &QPushButton::clicked, this, [this] {
+            const auto id = selectedPet();
+            if (swarm_.find(id))
+                showInteractions(id);
         });
     }
     refreshPets();
@@ -762,7 +946,7 @@ void ApplicationController::refreshPets() {
     };
     for (const auto &p : swarm_.pets()) {
         const QString action = p->exiting() ? "离场中" : p->entering() ? "入场中"
-            : p->dispatchLocked ? "交接中" : p->cosmeticFeeding ? "投喂动画"
+            : p->dispatchLocked ? "交接中" : p->petting ? "摸摸中" : p->cosmeticFeeding ? "投喂动画"
                                                                       : states.at(int(p->state));
         add({QString::number(p->id), p->displayName(), p->primary ? "主实体" : "自有",
              action, dispatch_->location(p->id),
@@ -792,6 +976,7 @@ void ApplicationController::refreshPets() {
     renamePet_->setEnabled(p && !p->primary);
     highlightPet_->setEnabled(p && dispatch_->canHighlight(id));
     foodPet_->setEnabled(p != nullptr);
+    interactionPet_->setEnabled(p != nullptr);
     bool eligible = !petTable_->selectionModel()->selectedRows().isEmpty();
     for (const auto &index : petTable_->selectionModel()->selectedRows()) {
         const auto n = petTable_->item(index.row(), 0)->data(Qt::UserRole).toULongLong();
@@ -869,6 +1054,8 @@ void ApplicationController::warn(const QString &message) {
 }
 void ApplicationController::persist() {
     settleFood();
+    settleInteractions();
+    progressChanged_ = false;
     QString error;
     const QJsonObject config{{"formatVersion", 1}, {"populationLimit", swarm_.limit()},
         {"paused", primary_.paused}, {"pace", primary_.pace},
@@ -876,6 +1063,7 @@ void ApplicationController::persist() {
         {"bottomMode", bottomMode_}};
     auto progress = swarm_.saveProgress();
     progress["food"] = food_.save();
+    progress["interaction"] = QJsonObject{{"cooldownRemaining", interactionCooldown_}};
     auto pets = progress.value("pets").toArray();
     for (int index = 0; index < pets.size(); ++index) {
         auto pet = pets[index].toObject();
@@ -953,6 +1141,7 @@ void ApplicationController::tick() {
     last_ = now;
     // Do not credit suspension or a long stopped event loop as active play time.
     const double dt = elapsed <= 1 ? elapsed : 0;
+    interactionCooldown_ = std::max(0.0, interactionCooldown_ - dt);
     if (elapsed > 1)
         lastSwarm_ = now;
     dispatch_->tick();
@@ -970,11 +1159,8 @@ void ApplicationController::tick() {
         ++impacts_;
     }
     crack_.advance(dt);
-    if (primary_.splitReady) {
-        const int count = primary_.juvenile ? 8 + int(primary_.random(0, 5)) : 10;
-        primary_.becomeNymph();
-        swarm_.spawn(primary_.position, primary_.area, primary_.generation, count - 1);
-    }
+    if (swarm_.splitPrimary())
+        progressChanged_ = true;
     if (now >= nextSwarm_) {
         swarm_.advance(now - lastSwarm_);
         lastSwarm_ = now;
@@ -989,16 +1175,19 @@ void ApplicationController::tick() {
     }
     mainWindow_.present();
     const bool foodChanged = settleFood();
+    const bool interactionChanged = settleInteractions();
     const bool dropped = food_.advance(dt);
-    if (foodChanged || dropped || (dirty_ && now >= retryAt_) || (!dirty_ && now >= nextSave_)) {
+    if (foodChanged || dropped || progressChanged_ || (dirty_ && now >= retryAt_) || (!dirty_ && now >= nextSave_)) {
         persist();
         nextSave_ = now + 5;
     }
-    if (ticks_ % 15 == 0 || foodChanged || dropped) {
+    if (ticks_ % 15 == 0 || foodChanged || dropped || interactionChanged) {
         if (petDialog_ && petDialog_->isVisible())
             refreshPets();
         if (foodDialog_ && foodDialog_->isVisible())
             refreshFood();
+        if (interactionDialog_ && interactionDialog_->isVisible())
+            refreshInteractions();
     }
     ++ticks_;
     const double workMs = work.nsecsElapsed() / 1e6;

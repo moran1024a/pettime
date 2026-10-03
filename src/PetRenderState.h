@@ -53,6 +53,12 @@ struct PetRenderState {
             s.mealPosition = s.position;
             s.speed = 0;
             s.actionAge = p.cosmeticAge < 1.15 ? p.cosmeticAge : p.cosmeticAge - 1.15;
+        } else if (p.petting) {
+            s.state = State::Happy;
+            s.mealActive = false;
+            s.speed = 0;
+            s.actionAge = p.pettingAge;
+            s.actionDuration = 2;
         }
         return s;
     }
@@ -60,13 +66,13 @@ struct PetRenderState {
         return {position.x(),    position.y(),   int(state),  juvenile,   scale,
                 heading,         speed,          phase,       idlePhase,  actionAge,
                 actionDuration,  flightDuration, pounceSpeed, mealActive, mealPosition.x(),
-                mealPosition.y(), growth};
+                mealPosition.y(), growth, affection};
     }
     static bool decode(const QJsonValue &v, PetRenderState &s) {
         if (!v.isArray())
             return false;
         const auto a = v.toArray();
-        if (a.size() != 17 || !a[3].isBool() || !a[13].isBool())
+        if (a.size() != 18 || !a[3].isBool() || !a[13].isBool())
             return false;
         for (int i = 0; i < a.size(); ++i)
             if (i != 3 && i != 13 &&
@@ -78,7 +84,8 @@ struct PetRenderState {
             a[4].toDouble() > 2 || a[9].toDouble() < 0 || a[10].toDouble() <= 0 ||
             a[11].toDouble() < .5 || a[12].toDouble() <= 0 || a[7].toDouble() < 0 ||
             a[8].toDouble() < 0 || a[16].toDouble() < 0 || a[16].toDouble() > 100 ||
-            a[3].toBool() != (a[16].toDouble() < 100))
+            a[3].toBool() != (a[16].toDouble() < 100) || a[17].toDouble() < 0 ||
+            a[17].toDouble() > 100 || a[17].toDouble() != std::floor(a[17].toDouble()))
             return false;
         s = {};
         s.position = {a[0].toDouble(), a[1].toDouble()};
@@ -86,6 +93,7 @@ struct PetRenderState {
         s.juvenile = a[3].toBool();
         s.scale = a[4].toDouble();
         s.growth = a[16].toDouble();
+        s.affection = a[17].toInt();
         s.heading = a[5].toDouble();
         s.speed = a[6].toDouble();
         s.phase = a[7].toDouble();

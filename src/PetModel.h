@@ -48,6 +48,7 @@ class PetModel {
     void setManualDirection(QPointF direction);
     bool manuallyControlled() const { return manualControl_; }
     bool playFeeding();
+    bool startPetting();
     QString displayName() const;
     std::uint64_t id = 0;
     QString customName;
@@ -56,6 +57,8 @@ class PetModel {
     bool dispatchLocked = false;
     bool cosmeticFeeding = false;
     double cosmeticAge = 0;
+    bool petting = false;
+    double pettingAge = 0;
     void demoPounce();
     void crush();
     void reveal(QRectF area);
@@ -70,6 +73,11 @@ class PetModel {
     double growth() const { return growth_; }
     double growthDuration() const { return growthDuration_; }
     quint64 feedingCompletions() const { return feedingCompletions_; }
+    quint64 pettingCompletions() const { return pettingCompletions_; }
+    int lastPettingGain() const { return lastPettingGain_; }
+    double affectionDecayRemaining() const { return affectionDecayRemaining_; }
+    double reproductionRemaining() const { return reproductionRemaining_; }
+    bool canReproduce() const;
     bool frontal() const;
     bool active() const { return state != State::Crush && state != State::Fade; }
     double progress() const;
@@ -81,7 +89,7 @@ class PetModel {
     bool paused = false, dragging = false, menuOpen = false;
     bool mealActive = false, eating = false, crashQueued = false, manualPounce = false;
     bool splitReady = false, expired = false, impact = false;
-    int affection = 0, generation = 0, evadeCount = 0;
+    int affection = 40, generation = 0, evadeCount = 0;
     double scale = AdultScale, pace = 1.5;
     double heading = -Pi / 2, speed = 0, phase = 0, idlePhase = 0;
     double age = 0, actionAge = 0, actionDuration = 1, traveled = 0;
@@ -93,6 +101,13 @@ class PetModel {
     double growth_ = 100;
     double growthDuration_ = 0;
     quint64 feedingCompletions_ = 0;
+    quint64 pettingCompletions_ = 0;
+    int lastPettingGain_ = 0;
+    double affectionDecayRemaining_ = 0;
+    double reproductionRemaining_ = 0;
+    double nextAffectionDecay();
+    void cancelPetting();
+    void updateAffection(double dt);
     double nextGrowthDuration();
     void addGrowth(double amount);
     void feedingGrowth();
@@ -115,6 +130,7 @@ class PetModel {
     void move(double dt, double margin, double turnRate, bool smoothCorner = true);
     std::mt19937 rng_;
     std::mt19937 growthRng_;
+    std::mt19937 affectionRng_;
     double desired_ = -Pi / 2, targetSpeed_ = 32, turnNoise_ = 0;
     double cooldown_ = 0, sinceEvade_ = 10, nextSpecial_ = 30, revealLeft_ = 0;
     double nextTurn_ = 0;
